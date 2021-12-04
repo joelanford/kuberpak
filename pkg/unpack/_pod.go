@@ -205,7 +205,7 @@ func (p *Pod) unpack(ctx context.Context) (*registry.Bundle, string, error) {
 func (p *Pod) configMap(bundle *olmv1alpha1.Bundle) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       "Job",
+			Kind:       "jobUnpacker",
 			APIVersion: batchv1.SchemeGroupVersion.String(),
 		},
 		ObjectMeta: metav1.ObjectMeta{

@@ -67,6 +67,20 @@ func EnsureCondition(condition metav1.Condition) UpdateStatusFunc {
 	}
 }
 
+func RemoveConditions(types ...olmv1alpha1.BundleConditionType) UpdateStatusFunc {
+	return func(status *olmv1alpha1.BundleStatus) bool {
+		updated := false
+		for _, t := range types {
+			existing := meta.FindStatusCondition(status.Conditions, string(t))
+			if existing != nil {
+				meta.RemoveStatusCondition(&status.Conditions, string(t))
+				updated = true
+			}
+		}
+		return updated
+	}
+}
+
 func EnsureObservedGeneration(observedGeneration int64) UpdateStatusFunc {
 	return func(status *olmv1alpha1.BundleStatus) bool {
 		if status.ObservedGeneration == observedGeneration {
@@ -77,16 +91,29 @@ func EnsureObservedGeneration(observedGeneration int64) UpdateStatusFunc {
 	}
 }
 
-func UnsetBundleContents() UpdateStatusFunc {
-	return SetBundleContents(nil)
-}
-
-func SetBundleContents(contents *olmv1alpha1.BundleContents) UpdateStatusFunc {
+func EnsureBundleDigest(digest string) UpdateStatusFunc {
 	return func(status *olmv1alpha1.BundleStatus) bool {
-		if status.Contents == contents {
+		if status.Digest == digest {
 			return false
 		}
-		status.Contents = contents
+		status.Digest = digest
+		return true
+	}
+}
+
+func UnsetBundleInfo() UpdateStatusFunc {
+	return SetBundleInfo(nil)
+}
+
+func SetBundleInfo(info *olmv1alpha1.BundleInfo) UpdateStatusFunc {
+	return func(status *olmv1alpha1.BundleStatus) bool {
+		if status.Info == info {
+			return false
+		}
+		if info != nil && status.Info != nil && *status.Info == *info {
+			return false
+		}
+		status.Info = info
 		return true
 	}
 }

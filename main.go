@@ -23,6 +23,7 @@ import (
 	openshiftv1alpha1 "github.com/openshift/api/operator/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -67,7 +68,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		MetricsBindAddress:     metricsAddr,
 		Port:                   9443,
@@ -80,15 +82,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	unpacker, err := unpack.NewPodFunc(mgr)
-	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
+	unpackerProvider := unpack.JobProvider{
+		Client:      mgr.GetClient(),
+		KubeClient:  kubernetes.NewForConfigOrDie(cfg),
+		Namespace:   "kuberpak-system",
+		UnpackImage: "quay.io/joelanford/kuberpak-unpack:v0.1.0",
 	}
+
 	if err = (&controllers.BundleReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
-		GetUnpacker: unpacker,
+		GetUnpacker: unpackerProvider.NewJob,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bundle")
 		os.Exit(1)

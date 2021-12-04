@@ -1700,6 +1700,7 @@ k8s.io/kube-openapi v0.0.0-20201113171705-d219536bb9fd/go.mod h1:WOJ3KddDSol4tAG
 k8s.io/kube-openapi v0.0.0-20210305001622-591a79e4bda7/go.mod h1:wXW5VT87nVfh/iLV8FpR2uDvrFyomxbtb1KivDbvPTE=
 k8s.io/kube-openapi v0.0.0-20210421082810-95288971da7e h1:KLHHjkdQFomZy8+06csTWZ0m1343QqxZhR2LJ1OxCYM=
 k8s.io/kube-openapi v0.0.0-20210421082810-95288971da7e/go.mod h1:vHXdDvt9+2spS2Rx9ql3I8tycm3H9FDfdUoIuKCefvw=
+k8s.io/kubectl v0.22.0 h1:EBb7xLUaidG/YXAI5AXam3lK2VlnoFShhlMjnJVTbGA=
 k8s.io/kubectl v0.22.0/go.mod h1:eeuP92uZbVL2UnOaf0nj9OjtI0hi/nekHU+0isURer0=
 k8s.io/kubernetes v1.13.0/go.mod h1:ocZa8+6APFNC2tX1DZASIbocyYT5jHzqFVsY5aoB7Jk=
 k8s.io/legacy-cloud-providers v0.21.0 h1:iWf5xaX9yvYT5mkz8UB96UtISQ5IkrWeuMPMhRp01ZY=

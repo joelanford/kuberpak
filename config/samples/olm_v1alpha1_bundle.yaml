@@ -1,6 +1,14 @@
+---
 apiVersion: olm.operatorframework.io/v1alpha1
 kind: Bundle
 metadata:
-  name: bundle-sample
+  name: bundle-sample1
+spec:
+  image: quay.io/joelanford/example-operator-bundle:0.1.0
+---
+apiVersion: olm.operatorframework.io/v1alpha1
+kind: Bundle
+metadata:
+  name: bundle-sample2
 spec:
   image: quay.io/joelanford/example-operator-bundle:0.1.0

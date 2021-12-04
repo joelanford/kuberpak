@@ -21,9 +21,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type BundleConditionType string
+
+const (
+	TypeUnpacked = "Unpacked"
+
+	ReasonUnpackSuccessful = "UnpackSuccessful"
+	ReasonUnpackFailed     = "UnpackFailed"
+)
+
 // BundleSpec defines the desired state of Bundle
 type BundleSpec struct {
-	// Image is the bunlde image that backs the content of this bundle.
+	// Image is the bundle image that backs the content of this bundle.
 	Image string `json:"image,omitempty"`
 
 	// ImagePullSecrets is a list of pull secrets to have available to
@@ -36,32 +45,20 @@ type BundleSpec struct {
 
 // BundleStatus defines the observed state of Bundle
 type BundleStatus struct {
-	Contents *BundleContents `json:"contents,omitempty"`
-
+	Info               *BundleInfo        `json:"info,omitempty"`
+	Digest             string             `json:"digest,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
-type BundleConditionType string
-
-const (
-	TypeFailedUnpack = "FailedUnpack"
-
-	ReasonUnpackSuccessful = "UnpackSuccessful"
-	ReasonImagePullFailure = "ImagePullFailure"
-	ReasonGetDigestFailure = "GetDigestFailure"
-	ReasonInvalidBundle    = "InvalidBundle"
-)
-
-type BundleContents struct {
-	Package string                   `json:"package,omitempty"`
-	Name    string                   `json:"name,omitempty"`
-	Version string                   `json:"version,omitempty"`
-	Digest  string                   `json:"imageDigest,omitempty"`
-	Objects []corev1.ObjectReference `json:"objectRefs,omitempty"`
+type BundleInfo struct {
+	Package string `json:"package,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Version string `json:"version,omitempty"`
 }
 
 //+kubebuilder:object:root=true
+//+kubebuilder:resource:scope=Cluster
 //+kubebuilder:subresource:status
 
 // Bundle is the Schema for the bundles API
