@@ -6,20 +6,20 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.6.1
   creationTimestamp: null
-  name: bundles.olm.operatorframework.io
+  name: bundleinstances.olm.operatorframework.io
 spec:
   group: olm.operatorframework.io
   names:
-    kind: Bundle
-    listKind: BundleList
-    plural: bundles
-    singular: bundle
+    kind: BundleInstance
+    listKind: BundleInstanceList
+    plural: bundleinstances
+    singular: bundleinstance
   scope: Cluster
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Bundle is the Schema for the bundles API
+        description: BundleInstance is the Schema for the bundleinstances API
         properties:
           apiVersion:
             description: 'APIVersion defines the versioned schema of this representation
@@ -34,37 +34,27 @@ spec:
           metadata:
             type: object
           spec:
-            description: BundleSpec defines the desired state of Bundle
+            description: BundleInstanceSpec defines the desired state of BundleInstance
             properties:
-              image:
-                description: Image is the bundle image that backs the content of this
-                  bundle.
+              bundleName:
+                description: BundleName is the name of the bundle that this instance
+                  is managing on the cluster.
                 type: string
-              imagePullSecret:
-                description: ImagePullSecrets is a list of pull secrets to have available
-                  to pull the referenced image.
-                items:
-                  description: LocalObjectReference contains enough information to
-                    let you locate the referenced object inside the same namespace.
-                  properties:
-                    name:
-                      description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        TODO: Add other useful fields. apiVersion, kind, uid?'
-                      type: string
-                  type: object
-                type: array
               provisionerClassName:
                 description: ProvisionerClassName sets the name of the provisioner
                   that should reconcile this BundleInstance.
                 type: string
             required:
-            - image
+            - bundleName
             - provisionerClassName
             type: object
           status:
-            description: BundleStatus defines the observed state of Bundle
+            description: BundleInstanceStatus defines the observed state of BundleInstance
             properties:
               conditions:
+                description: 'INSERT ADDITIONAL STATUS FIELD - define observed state
+                  of cluster Important: Run "make" to regenerate code after modifying
+                  this file'
                 items:
                   description: "Condition contains details for one aspect of the current
                     state of this API Resource. --- This struct is intended for direct
@@ -133,20 +123,6 @@ spec:
                   - type
                   type: object
                 type: array
-              digest:
-                type: string
-              info:
-                properties:
-                  name:
-                    type: string
-                  package:
-                    type: string
-                  version:
-                    type: string
-                type: object
-              observedGeneration:
-                format: int64
-                type: integer
             type: object
         type: object
     served: true

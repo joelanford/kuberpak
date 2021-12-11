@@ -82,7 +82,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	unpackerProvider := unpack.JobProvider{
+	unpackerProvider := unpack.PodProvider{
 		Client:      mgr.GetClient(),
 		KubeClient:  kubernetes.NewForConfigOrDie(cfg),
 		Namespace:   "kuberpak-system",
@@ -92,9 +92,16 @@ func main() {
 	if err = (&controllers.BundleReconciler{
 		Client:      mgr.GetClient(),
 		Scheme:      mgr.GetScheme(),
-		GetUnpacker: unpackerProvider.NewJob,
+		GetUnpacker: unpackerProvider.NewPod,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bundle")
+		os.Exit(1)
+	}
+	if err = (&controllers.BundleInstanceReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "BundleInstance")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

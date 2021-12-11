@@ -2,13 +2,15 @@
 apiVersion: olm.operatorframework.io/v1alpha1
 kind: Bundle
 metadata:
-  name: bundle-sample1
+  name: example-operator-0.1.0-1
 spec:
+  provisionerClassName: kuberpak.io/registry+v1
   image: quay.io/joelanford/example-operator-bundle:0.1.0
 ---
 apiVersion: olm.operatorframework.io/v1alpha1
 kind: Bundle
 metadata:
-  name: bundle-sample2
+  name: example-operator-0.1.0-2
 spec:
+  provisionerClassName: kuberpak.io/registry+v1
   image: quay.io/joelanford/example-operator-bundle:0.1.0

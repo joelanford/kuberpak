@@ -7,17 +7,27 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
-  - delete
-- apiGroups:
   - ""
   resources:
   - configmaps
-  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - olm.operatorframework.io
+  resources:
+  - bundleinstances
   verbs:
   - create
   - delete
@@ -26,6 +36,20 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - olm.operatorframework.io
+  resources:
+  - bundleinstances/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - olm.operatorframework.io
+  resources:
+  - bundleinstances/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - olm.operatorframework.io
   resources:
@@ -52,20 +76,3 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - clusterrolebindings
-  - clusterroles
-  - rolebindings
-  - roles
-  verbs:
-  - bind
-  - create
-  - delete
-  - escalate
-  - get
-  - list
-  - patch
-  - updated
-  - watch

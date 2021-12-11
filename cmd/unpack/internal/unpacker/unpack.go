@@ -10,10 +10,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"reflect"
 
 	"github.com/go-logr/logr"
+	"github.com/operator-framework/operator-registry/pkg/registry"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -24,14 +26,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/yaml"
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
 )
 
 func UnpackCommand() *cobra.Command {
 	var (
-		unpacker     Unpacker
-		manifestsDir string
+		unpacker  Unpacker
+		bundleDir string
 	)
 
 	cmd := &cobra.Command{
@@ -45,7 +48,7 @@ func UnpackCommand() *cobra.Command {
 				os.Exit(1)
 			}
 			unpacker.Client = cl
-			unpacker.Manifests = os.DirFS(manifestsDir)
+			unpacker.Bundle = os.DirFS(bundleDir)
 			unpacker.Log = log
 			if err := unpacker.Run(cmd.Context()); err != nil {
 				log.Error(err, "unpack failed")
@@ -57,7 +60,7 @@ func UnpackCommand() *cobra.Command {
 	cmd.Flags().StringVar(&unpacker.Namespace, "namespace", "", "namespace in which to unpack configmaps")
 	cmd.Flags().StringVar(&unpacker.PodName, "pod-name", "", "name of pod with bundle image container")
 	cmd.Flags().StringVar(&unpacker.BundleName, "bundle-name", "", "the name of the bundle object that is being unpacked")
-	cmd.Flags().StringVar(&manifestsDir, "manifests-dir", "", "directory in which manifests can be found")
+	cmd.Flags().StringVar(&bundleDir, "bundle-dir", "", "directory in which the bundle can be found")
 	return cmd
 }
 
@@ -81,8 +84,8 @@ type Unpacker struct {
 	Namespace string
 	PodName   string
 
-	// A filesystem containing the bundle manifests
-	Manifests fs.FS
+	// A filesystem containing the bundle manifests and metadata
+	Bundle fs.FS
 
 	// Used to apply metadata to the generated configmaps
 	PackageName string
@@ -99,6 +102,12 @@ func (u *Unpacker) Run(ctx context.Context) error {
 
 	u.Log.Info("getting image digest")
 	resolvedImage, err := u.getImageDigest(ctx, bundle.Spec.Image)
+	if err != nil {
+		return err
+	}
+
+	u.Log.Info("get metadata")
+	annotations, err := u.getAnnotations()
 	if err != nil {
 		return err
 	}
@@ -121,7 +130,7 @@ func (u *Unpacker) Run(ctx context.Context) error {
 	}
 
 	u.Log.Info("get desired config maps")
-	desiredConfigMaps, err := u.getDesiredConfigMaps(bundle, resolvedImage, objects)
+	desiredConfigMaps, err := u.getDesiredConfigMaps(bundle, resolvedImage, annotations, objects)
 	if err != nil {
 		return err
 	}
@@ -155,10 +164,23 @@ func (u *Unpacker) getImageDigest(ctx context.Context, image string) (string, er
 	return "", fmt.Errorf("image digest for image %q not found", image)
 }
 
+func (u *Unpacker) getAnnotations() (*registry.Annotations, error) {
+	fileData, err := fs.ReadFile(u.Bundle, filepath.Join("metadata", "annotations.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	annotationsFile := registry.AnnotationsFile{}
+	if err := yaml.Unmarshal(fileData, &annotationsFile); err != nil {
+		return nil, err
+	}
+	return &annotationsFile.Annotations, nil
+}
+
 func (u *Unpacker) getObjects() ([]client.Object, error) {
 	var objects []client.Object
+	const manifestsDir = "manifests"
 
-	entries, err := fs.ReadDir(u.Manifests, ".")
+	entries, err := fs.ReadDir(u.Bundle, manifestsDir)
 	if err != nil {
 		return nil, fmt.Errorf("read manifests: %v", err)
 	}
@@ -166,7 +188,7 @@ func (u *Unpacker) getObjects() ([]client.Object, error) {
 		if e.IsDir() {
 			continue
 		}
-		fileData, err := fs.ReadFile(u.Manifests, e.Name())
+		fileData, err := fs.ReadFile(u.Bundle, filepath.Join(manifestsDir, e.Name()))
 		if err != nil {
 			return nil, err
 		}
@@ -189,7 +211,7 @@ func (u *Unpacker) getConfigMapLabels() map[string]string {
 	return map[string]string{"kuberpak.io/bundle-name": u.BundleName}
 }
 
-func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImage string, objects []client.Object) ([]corev1.ConfigMap, error) {
+func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImage string, annotations *registry.Annotations, objects []client.Object) ([]corev1.ConfigMap, error) {
 	var desiredConfigMaps []corev1.ConfigMap
 	for _, obj := range objects {
 		objData, err := yaml.Marshal(obj)
@@ -216,6 +238,7 @@ func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImag
 			Immutable: &immutable,
 			Data: map[string]string{
 				"bundle-image":      resolvedImage,
+				"package-name":      annotations.PackageName,
 				"object-sha256":     hash,
 				"object-kind":       kind,
 				"object-apiversion": apiVersion,
@@ -244,28 +267,40 @@ func (u *Unpacker) ensureDesiredConfigMaps(ctx context.Context, actual, desired 
 	for _, cm := range desired {
 		cm := cm
 		key := types.NamespacedName{Namespace: cm.Namespace, Name: cm.Name}
-		if ecm, ok := actualCms[key]; ok {
-			if stringMapsEqual(ecm.Labels, cm.Labels) &&
-				stringMapsEqual(ecm.Annotations, cm.Annotations) &&
-				stringMapsEqual(ecm.Data, cm.Data) &&
-				bytesMapsEqual(ecm.BinaryData, cm.BinaryData) {
+		if acm, ok := actualCms[key]; ok {
+			if configMapsEqual(acm, cm) {
+				u.Log.Info("found desired configmap, skipping", "name", acm.Name)
 				delete(actualCms, key)
 				continue
 			}
-			if err := u.Client.Delete(ctx, &ecm); client.IgnoreNotFound(err) != nil {
+		}
+		acm := &corev1.ConfigMap{}
+		if err := u.Client.Get(ctx, client.ObjectKeyFromObject(&cm), acm); err == nil {
+			u.Log.Info("configmap needs update, deleting", "name", acm.Name)
+			if err := u.Client.Delete(ctx, acm); client.IgnoreNotFound(err) != nil {
 				return fmt.Errorf("delete configmap: %v", err)
 			}
 		}
+		u.Log.Info("creating desired configmap", "name", cm.Name)
 		if err := u.Client.Create(ctx, &cm); err != nil {
 			return fmt.Errorf("create configmap: %v", err)
 		}
 	}
-	for _, ecm := range actualCms {
-		if err := u.Client.Delete(ctx, &ecm); client.IgnoreNotFound(err) != nil {
+	for _, acm := range actualCms {
+		u.Log.Info("deleting undesired configmap", "name", acm.Name)
+		if err := u.Client.Delete(ctx, &acm); client.IgnoreNotFound(err) != nil {
 			return fmt.Errorf("delete configmap: %v", err)
 		}
 	}
 	return nil
+}
+
+func configMapsEqual(a, b corev1.ConfigMap) bool {
+	return stringMapsEqual(a.Labels, b.Labels) &&
+		stringMapsEqual(a.Annotations, b.Annotations) &&
+		ownerRefsEqual(a.OwnerReferences, b.OwnerReferences) &&
+		stringMapsEqual(a.Data, b.Data) &&
+		bytesMapsEqual(a.BinaryData, b.BinaryData)
 }
 
 func stringMapsEqual(a, b map[string]string) bool {
@@ -288,6 +323,19 @@ func bytesMapsEqual(a, b map[string][]byte) bool {
 	for ka, va := range a {
 		vb, ok := b[ka]
 		if !ok || !bytes.Equal(va, vb) {
+			return false
+		}
+	}
+	return true
+}
+
+func ownerRefsEqual(a, b []metav1.OwnerReference) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, ora := range a {
+		orb := b[i]
+		if !reflect.DeepEqual(ora, orb) {
 			return false
 		}
 	}

@@ -21,13 +21,14 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
 	"github.com/joelanford/kuberpak/internal/updater"
@@ -44,9 +45,7 @@ type BundleReconciler struct {
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles/finalizers,verbs=update
-//+kubebuilder:rbac:groups=core,resources=configmaps;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;delete
-//+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings;clusterroles;clusterrolebindings,verbs=get;list;watch;create;updated;patch;delete;bind;escalate
+//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -283,15 +282,17 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 //	return nil
 //}
 
+func bundleProvisionerFilter(provisionerClassName string) predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		b := obj.(*olmv1alpha1.Bundle)
+		return b.Spec.ProvisionerClassName == provisionerClassName
+	})
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&olmv1alpha1.Bundle{}).
-		Owns(&corev1.ServiceAccount{}).
-		Owns(&rbacv1.Role{}).
-		Owns(&rbacv1.ClusterRole{}).
-		Owns(&rbacv1.RoleBinding{}).
-		Owns(&rbacv1.ClusterRoleBinding{}).
+		For(&olmv1alpha1.Bundle{}, builder.WithPredicates(bundleProvisionerFilter("kuberpak.io/registry+v1"))).
 		Owns(&corev1.ConfigMap{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 128}).
 		Complete(r)

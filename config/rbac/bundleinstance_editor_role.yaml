@@ -1,0 +1,24 @@
+# permissions for end users to edit bundleinstances.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bundleinstance-editor-role
+rules:
+- apiGroups:
+  - olm.operatorframework.io
+  resources:
+  - bundleinstances
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - olm.operatorframework.io
+  resources:
+  - bundleinstances/status
+  verbs:
+  - get

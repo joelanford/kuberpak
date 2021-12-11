@@ -1,0 +1,9 @@
+apiVersion: olm.operatorframework.io/v1alpha1
+kind: BundleInstance
+metadata:
+  name: bundleinstance-sample
+  annotations:
+    kuberpak.io/install-namespace: default
+spec:
+  provisionerClassName: kuberpak.io/registry+v1
+  bundleName: bundle-sample1

@@ -1,0 +1,20 @@
+# permissions for end users to view bundleinstances.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bundleinstance-viewer-role
+rules:
+- apiGroups:
+  - olm.operatorframework.io
+  resources:
+  - bundleinstances
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - olm.operatorframework.io
+  resources:
+  - bundleinstances/status
+  verbs:
+  - get

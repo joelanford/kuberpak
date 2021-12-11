@@ -32,15 +32,15 @@ const (
 
 // BundleSpec defines the desired state of Bundle
 type BundleSpec struct {
+	// ProvisionerClassName sets the name of the provisioner that should reconcile this BundleInstance.
+	ProvisionerClassName string `json:"provisionerClassName"`
+
 	// Image is the bundle image that backs the content of this bundle.
-	Image string `json:"image,omitempty"`
+	Image string `json:"image"`
 
 	// ImagePullSecrets is a list of pull secrets to have available to
 	// pull the referenced image.
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecret,omitempty"`
-
-	// ServiceAccount is the name of a service account to use for image pulling.
-	ServiceAccount string `json:"serviceAccount,omitempty"`
 }
 
 // BundleStatus defines the observed state of Bundle
