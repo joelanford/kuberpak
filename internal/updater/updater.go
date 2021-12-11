@@ -49,6 +49,9 @@ func (u *Updater) Apply(ctx context.Context, b *olmv1alpha1.Bundle) error {
 	backoff := retry.DefaultRetry
 
 	return retry.RetryOnConflict(backoff, func() error {
+		if err := u.client.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
+			return err
+		}
 		needsStatusUpdate := false
 		for _, f := range u.updateStatusFuncs {
 			needsStatusUpdate = f(&b.Status) || needsStatusUpdate
@@ -65,6 +68,16 @@ func EnsureCondition(condition metav1.Condition) UpdateStatusFunc {
 		existing := meta.FindStatusCondition(status.Conditions, condition.Type)
 		meta.SetStatusCondition(&status.Conditions, condition)
 		return existing == nil || *existing != condition
+	}
+}
+
+func SetPhase(phase string) UpdateStatusFunc {
+	return func(status *olmv1alpha1.BundleStatus) bool {
+		if status.Phase == phase {
+			return false
+		}
+		status.Phase = phase
+		return true
 	}
 }
 

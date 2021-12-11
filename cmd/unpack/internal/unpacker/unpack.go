@@ -102,7 +102,7 @@ func (u *Unpacker) Run(ctx context.Context) error {
 	bundle.SetGroupVersionKind(olmv1alpha1.GroupVersion.WithKind("Bundle"))
 
 	u.Log.Info("getting image digest")
-	resolvedImage, err := u.getImageDigest(ctx, bundle.Spec.Image)
+	resolvedImage, err := u.getImageDigest(ctx)
 	if err != nil {
 		return err
 	}
@@ -146,23 +146,18 @@ func (u *Unpacker) Run(ctx context.Context) error {
 	return u.ensureDesiredConfigMaps(ctx, actualConfigMaps.Items, desiredConfigMaps)
 }
 
-func (u *Unpacker) getImageDigest(ctx context.Context, image string) (string, error) {
+func (u *Unpacker) getImageDigest(ctx context.Context) (string, error) {
 	podKey := types.NamespacedName{Namespace: u.Namespace, Name: u.PodName}
 	pod := &corev1.Pod{}
 	if err := u.Client.Get(ctx, podKey, pod); err != nil {
 		return "", err
 	}
 	for _, ps := range pod.Status.InitContainerStatuses {
-		if ps.Image == image && ps.ImageID != "" {
+		if ps.Name == "copy-bundle" && ps.ImageID != "" {
 			return ps.ImageID, nil
 		}
 	}
-	for _, ps := range pod.Status.ContainerStatuses {
-		if ps.Image == image && ps.ImageID != "" {
-			return ps.ImageID, nil
-		}
-	}
-	return "", fmt.Errorf("image digest for image %q not found", image)
+	return "", fmt.Errorf("bundle image digest not found")
 }
 
 func (u *Unpacker) getAnnotations() (*registry.Annotations, error) {

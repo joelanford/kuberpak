@@ -16,7 +16,17 @@ spec:
     singular: bundle
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Bundle is the Schema for the bundles API
@@ -40,17 +50,18 @@ spec:
                 description: Image is the bundle image that backs the content of this
                   bundle.
                 type: string
-              imagePullSecret:
+              imagePullSecrets:
                 description: ImagePullSecrets is a list of pull secrets to have available
                   to pull the referenced image.
                 items:
-                  description: LocalObjectReference contains enough information to
-                    let you locate the referenced object inside the same namespace.
                   properties:
                     name:
-                      description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        TODO: Add other useful fields. apiVersion, kind, uid?'
                       type: string
+                    namespace:
+                      type: string
+                  required:
+                  - name
+                  - namespace
                   type: object
                 type: array
               provisionerClassName:
@@ -180,6 +191,8 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              phase:
+                type: string
             type: object
         type: object
     served: true

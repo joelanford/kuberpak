@@ -2,6 +2,7 @@ package unpack
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -46,7 +47,12 @@ type podUnpacker struct {
 }
 
 func (p podUnpacker) Unpack(ctx context.Context) (*olmv1alpha1.BundleStatus, error) {
-	pod := p.pod(p.bundle)
+	imagePullSecrets, err := p.createImagePullSecrets(ctx, p.bundle)
+	if err != nil {
+		return nil, err
+	}
+
+	pod := p.pod(p.bundle, imagePullSecrets)
 	existingPod := &corev1.Pod{}
 	if err := p.Get(ctx, client.ObjectKeyFromObject(pod), existingPod); err == nil {
 		if deleteErr := p.ensurePodDeletion(ctx, pod); deleteErr != nil {
@@ -59,12 +65,19 @@ func (p podUnpacker) Unpack(ctx context.Context) (*olmv1alpha1.BundleStatus, err
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 
-	err := p.waitForPodCompletion(ctx, pod)
+	err = p.waitForPodCompletion(ctx, pod)
 	if deleteErr := p.ensurePodDeletion(ctx, pod); deleteErr != nil {
 		return nil, deleteErr
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	for _, ips := range imagePullSecrets {
+		ips := ips
+		if err := p.Delete(ctx, &ips); err != nil {
+			return nil, fmt.Errorf("delete temporary image pull secret: %v", err)
+		}
 	}
 
 	cm := &corev1.ConfigMap{}
@@ -106,6 +119,44 @@ func (p podUnpacker) Unpack(ctx context.Context) (*olmv1alpha1.BundleStatus, err
 	return bundleStatus, nil
 }
 
+func (p podUnpacker) createImagePullSecrets(ctx context.Context, bundle *olmv1alpha1.Bundle) ([]corev1.Secret, error) {
+	var tmpSecrets []corev1.Secret
+	controllerRef := metav1.NewControllerRef(bundle, bundle.GroupVersionKind())
+	for _, ipsKey := range bundle.Spec.ImagePullSecrets {
+		ips := &corev1.Secret{}
+		if err := p.Client.Get(ctx, types.NamespacedName(ipsKey), ips); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("get image pull secret: %v", err)
+		}
+		name := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%s/%s", ipsKey.Namespace, ipsKey.Name))))
+		immutable := true
+		tmpSecret := ips.DeepCopy()
+		tmpSecret.SetResourceVersion("")
+		tmpSecret.SetGeneration(0)
+		tmpSecret.SetUID("")
+		tmpSecret.SetNamespace(p.Namespace)
+		tmpSecret.SetName(name)
+		tmpSecret.SetOwnerReferences([]metav1.OwnerReference{*controllerRef})
+		tmpSecret.Immutable = &immutable
+
+		existingSecret := &corev1.Secret{}
+		if err := p.Get(ctx, client.ObjectKeyFromObject(tmpSecret), existingSecret); err == nil {
+			if deleteErr := p.Delete(ctx, existingSecret); deleteErr != nil {
+				return nil, deleteErr
+			}
+		}
+
+		if err := p.Create(ctx, tmpSecret); err != nil {
+			return nil, err
+		}
+		tmpSecret.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Secret"))
+		tmpSecrets = append(tmpSecrets, *tmpSecret)
+	}
+	return tmpSecrets, nil
+}
+
 func (p *podUnpacker) ensurePodDeletion(ctx context.Context, pod *corev1.Pod) error {
 	var g errgroup.Group
 	watchStarted := make(chan struct{})
@@ -127,7 +178,15 @@ func deriveName(b *olmv1alpha1.Bundle) string {
 	return fmt.Sprintf("kuberpak-unpack-bundle-%s", b.Name)
 }
 
-func (p podUnpacker) pod(bundle *olmv1alpha1.Bundle) *corev1.Pod {
+func (p podUnpacker) pod(bundle *olmv1alpha1.Bundle, imagePullSecrets []corev1.Secret) *corev1.Pod {
+	var imagePullSecretRefs []corev1.LocalObjectReference
+	for _, ips := range imagePullSecrets {
+		imagePullSecretRefs = append(imagePullSecretRefs, corev1.LocalObjectReference{Name: ips.Name})
+	}
+	sort.Slice(imagePullSecretRefs, func(i, j int) bool {
+		return imagePullSecretRefs[i].Name < imagePullSecretRefs[j].Name
+	})
+
 	controllerRef := metav1.NewControllerRef(bundle, bundle.GroupVersionKind())
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -138,6 +197,7 @@ func (p podUnpacker) pod(bundle *olmv1alpha1.Bundle) *corev1.Pod {
 		},
 		Spec: corev1.PodSpec{
 			ServiceAccountName: "kuberpak-bundle-unpacker",
+			ImagePullSecrets:   imagePullSecretRefs,
 			Volumes: []corev1.Volume{
 				{Name: "util", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 				{Name: "bundle", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
@@ -227,6 +287,14 @@ loop:
 				case corev1.PodFailed:
 					// TODO: get pod logs
 					return fmt.Errorf("unpack pod failed")
+				}
+				for _, cStatus := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+					if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ErrImagePull" {
+						return fmt.Errorf(cStatus.State.Waiting.Message)
+					}
+					if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ImagePullBackoff" {
+						return fmt.Errorf(cStatus.State.Waiting.Message)
+					}
 				}
 			case watch.Deleted:
 				return fmt.Errorf("pod %q was deleted prior to completion", pod.Name)

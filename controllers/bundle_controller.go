@@ -19,6 +19,8 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,7 +47,7 @@ type BundleReconciler struct {
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles/finalizers,verbs=update
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;delete
+//+kubebuilder:rbac:groups=core,resources=pods;secrets,verbs=get;list;watch;create;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -80,7 +82,11 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 
 	u.UpdateStatus(
 		updater.UnsetBundleInfo(),
+		updater.SetPhase("Unpacking"),
 	)
+	if err := u.Apply(ctx, bundle); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	l.Info("unpacking bundle")
 	status, err := unpacker.Unpack(ctx)
@@ -98,6 +104,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 
 	l.Info("updating bundle contents")
 	u.UpdateStatus(
+		updater.SetPhase("Unpacked"),
 		updater.SetBundleInfo(status.Info),
 		updater.EnsureBundleDigest(status.Digest),
 		updater.EnsureCondition(metav1.Condition{
@@ -113,7 +120,10 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 // SetupWithManager sets up the controller with the Manager.
 func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&olmv1alpha1.Bundle{}, builder.WithPredicates(bundleProvisionerFilter("kuberpak.io/registry+v1"))).
+		For(&olmv1alpha1.Bundle{}, builder.WithPredicates(
+			bundleProvisionerFilter("kuberpak.io/registry+v1"),
+			ignoreStatusChanges(),
+		)).
 		Owns(&corev1.ConfigMap{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 128}).
 		Complete(r)
@@ -124,4 +134,16 @@ func bundleProvisionerFilter(provisionerClassName string) predicate.Predicate {
 		b := obj.(*olmv1alpha1.Bundle)
 		return b.Spec.ProvisionerClassName == provisionerClassName
 	})
+}
+
+func ignoreStatusChanges() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(evt event.UpdateEvent) bool {
+			a := evt.ObjectOld.(*olmv1alpha1.Bundle)
+			b := evt.ObjectNew.(*olmv1alpha1.Bundle)
+			a.Status = olmv1alpha1.BundleStatus{}
+			b.Status = olmv1alpha1.BundleStatus{}
+			return reflect.DeepEqual(a, b)
+		},
+	}
 }

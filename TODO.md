@@ -1,6 +1,9 @@
 # TODO
 
 - [ ] Make `Bundle` have immutable spec.
+- [ ] Make `const` for the name of the container whose image is the bundle image
+      in the unpack pod.
+- [ ] Is there a way to prevent multiple reconciles and flapping between "Unpacking" and "Unpacked"?
 
 # Questions
 
