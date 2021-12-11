@@ -158,6 +158,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		)
 		return ctrl.Result{}, fmt.Errorf("unpack bundle: %v", err)
 	}
+
 	//version, err := rBundle.Version()
 	//if err != nil {
 	//	u.UpdateStatus(

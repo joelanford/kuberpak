@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,7 +25,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/yaml"
 
@@ -99,6 +99,7 @@ func (u *Unpacker) Run(ctx context.Context) error {
 	if err := u.Client.Get(ctx, bundleKey, bundle); err != nil {
 		return err
 	}
+	bundle.SetGroupVersionKind(olmv1alpha1.GroupVersion.WithKind("Bundle"))
 
 	u.Log.Info("getting image digest")
 	resolvedImage, err := u.getImageDigest(ctx, bundle.Spec.Image)
@@ -176,8 +177,8 @@ func (u *Unpacker) getAnnotations() (*registry.Annotations, error) {
 	return &annotationsFile.Annotations, nil
 }
 
-func (u *Unpacker) getObjects() ([]client.Object, error) {
-	var objects []client.Object
+func (u *Unpacker) getObjects() ([]unstructured.Unstructured, error) {
+	var objects []unstructured.Unstructured
 	const manifestsDir = "manifests"
 
 	entries, err := fs.ReadDir(u.Bundle, manifestsDir)
@@ -201,7 +202,7 @@ func (u *Unpacker) getObjects() ([]client.Object, error) {
 			} else if err != nil {
 				return nil, err
 			}
-			objects = append(objects, &obj)
+			objects = append(objects, obj)
 		}
 	}
 	return objects, nil
@@ -211,8 +212,27 @@ func (u *Unpacker) getConfigMapLabels() map[string]string {
 	return map[string]string{"kuberpak.io/bundle-name": u.BundleName}
 }
 
-func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImage string, annotations *registry.Annotations, objects []client.Object) ([]corev1.ConfigMap, error) {
+func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImage string, annotations *registry.Annotations, objects []unstructured.Unstructured) ([]corev1.ConfigMap, error) {
 	var desiredConfigMaps []corev1.ConfigMap
+
+	var (
+		pkgName       = annotations.PackageName
+		bundleName    string
+		bundleVersion string
+	)
+
+	for _, obj := range objects {
+		if obj.GetObjectKind().GroupVersionKind().Kind == "ClusterServiceVersion" {
+			if v, found, err := unstructured.NestedString(obj.Object, "spec", "version"); found && err == nil {
+				bundleVersion = v
+			}
+			if v, found, err := unstructured.NestedString(obj.Object, "metadata", "name"); found && err == nil {
+				bundleName = v
+			}
+		}
+	}
+	immutable := true
+	controllerRef := metav1.NewControllerRef(bundle, bundle.GroupVersionKind())
 	for _, obj := range objects {
 		objData, err := yaml.Marshal(obj)
 		if err != nil {
@@ -227,18 +247,20 @@ func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImag
 		if err := gzipper.Close(); err != nil {
 			return nil, fmt.Errorf("close gzip writer: %v", err)
 		}
-		immutable := true
 		kind, apiVersion := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
 		cm := corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("bundle-object-%s-%s", u.BundleName, hash[0:8]),
-				Namespace: u.Namespace,
-				Labels:    u.getConfigMapLabels(),
+				Name:            fmt.Sprintf("bundle-object-%s-%s", u.BundleName, hash[0:8]),
+				Namespace:       u.Namespace,
+				Labels:          u.getConfigMapLabels(),
+				OwnerReferences: []metav1.OwnerReference{*controllerRef},
 			},
 			Immutable: &immutable,
 			Data: map[string]string{
+				"package-name":      pkgName,
 				"bundle-image":      resolvedImage,
-				"package-name":      annotations.PackageName,
+				"bundle-name":       bundleName,
+				"bundle-version":    bundleVersion,
 				"object-sha256":     hash,
 				"object-kind":       kind,
 				"object-apiversion": apiVersion,
@@ -249,12 +271,33 @@ func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImag
 				"object": objCompressed.Bytes(),
 			},
 		}
-		if err := controllerutil.SetControllerReference(bundle, &cm, u.Client.Scheme()); err != nil {
-			return nil, fmt.Errorf("set owner reference on configmap: %v", err)
-		}
 		desiredConfigMaps = append(desiredConfigMaps, cm)
 	}
-	return desiredConfigMaps, nil
+	objectConfigMaps := []string{}
+	for _, dcm := range desiredConfigMaps {
+		objectConfigMaps = append(objectConfigMaps, dcm.Name)
+	}
+	ocmJson, err := json.Marshal(objectConfigMaps)
+	if err != nil {
+		return nil, fmt.Errorf("marshal object configmap names as json: %v", err)
+	}
+	metadataCm := corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            fmt.Sprintf("bundle-metadata-%s", u.BundleName),
+			Namespace:       u.Namespace,
+			Labels:          u.getConfigMapLabels(),
+			OwnerReferences: []metav1.OwnerReference{*controllerRef},
+		},
+		Immutable: &immutable,
+		Data: map[string]string{
+			"objects":        string(ocmJson),
+			"package-name":   pkgName,
+			"bundle-image":   resolvedImage,
+			"bundle-name":    bundleName,
+			"bundle-version": bundleVersion,
+		},
+	}
+	return append(desiredConfigMaps, metadataCm), nil
 }
 
 func (u *Unpacker) ensureDesiredConfigMaps(ctx context.Context, actual, desired []corev1.ConfigMap) error {
