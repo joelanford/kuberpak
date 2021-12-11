@@ -52,9 +52,18 @@ type BundleStatus struct {
 }
 
 type BundleInfo struct {
-	Package string `json:"package,omitempty"`
-	Name    string `json:"name,omitempty"`
-	Version string `json:"version,omitempty"`
+	Package string         `json:"package"`
+	Name    string         `json:"name"`
+	Version string         `json:"version"`
+	Objects []BundleObject `json:"objects,omitempty"`
+}
+
+type BundleObject struct {
+	APIVersion   string                      `json:"apiVersion"`
+	Kind         string                      `json:"kind"`
+	Name         string                      `json:"name"`
+	Namespace    string                      `json:"namespace"`
+	ConfigMapRef corev1.LocalObjectReference `json:"configMapRef"`
 }
 
 //+kubebuilder:object:root=true

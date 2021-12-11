@@ -247,7 +247,7 @@ func (u *Unpacker) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImag
 		if err := gzipper.Close(); err != nil {
 			return nil, fmt.Errorf("close gzip writer: %v", err)
 		}
-		kind, apiVersion := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
+		apiVersion, kind := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
 		cm := corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            fmt.Sprintf("bundle-object-%s-%s", u.BundleName, hash[0:8]),

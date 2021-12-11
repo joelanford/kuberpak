@@ -18,6 +18,7 @@ package updater
 
 import (
 	"context"
+	"reflect"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -107,10 +108,7 @@ func UnsetBundleInfo() UpdateStatusFunc {
 
 func SetBundleInfo(info *olmv1alpha1.BundleInfo) UpdateStatusFunc {
 	return func(status *olmv1alpha1.BundleStatus) bool {
-		if status.Info == info {
-			return false
-		}
-		if info != nil && status.Info != nil && *status.Info == *info {
+		if reflect.DeepEqual(status.Info, info) {
 			return false
 		}
 		status.Info = info

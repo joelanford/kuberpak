@@ -9,5 +9,5 @@ import (
 type NewUnpackerFunc func(*olmv1alpha1.Bundle) Unpacker
 
 type Unpacker interface {
-	Unpack(context.Context) error
+	Unpack(context.Context) (*olmv1alpha1.BundleStatus, error)
 }

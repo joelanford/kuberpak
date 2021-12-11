@@ -76,78 +76,15 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		updater.EnsureObservedGeneration(bundle.Generation),
 	)
 
-	//actualConfigMaps := &corev1.ConfigMapList{}
-	//if err := r.List(ctx, actualConfigMaps, &client.ListOptions{LabelSelector: labels.SelectorFromSet(labels.Set{
-	//	"kuberpak.io/bundle-name": bundle.Name,
-	//})}); err != nil {
-	//	u.UpdateStatus(
-	//		updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeUnpacked,
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  olmv1alpha1.ReasonListConfigMapsFailed,
-	//			Message: err.Error(),
-	//		}),
-	//		updater.UnsetBundleInfo(),
-	//	)
-	//	return ctrl.Result{}, fmt.Errorf("list configmaps: %v", err)
-	//}
-	//expectedConfigMaps := []corev1.ConfigMap{}
-	//defer func() {
-	//	if err := r.ensureExpectedConfigMaps(ctx, actualConfigMaps.Items, expectedConfigMaps); err != nil {
-	//		u.UpdateStatus(updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeUnpacked,
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  olmv1alpha1.ReasonReconcileConfigMapsFailed,
-	//			Message: err.Error(),
-	//		}))
-	//		if reconcileErr == nil {
-	//			reconcileErr = err
-	//		}
-	//	}
-	//}()
-
 	unpacker := r.GetUnpacker(bundle)
-	//l.Info("getting digest")
-	//digest, err := unpacker.GetDigest(ctx)
-	//if err != nil {
-	//	u.UpdateStatus(
-	//		updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeUnpacked,
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  olmv1alpha1.ReasonGetDigestFailed,
-	//			Message: err.Error(),
-	//		}),
-	//		updater.RemoveConditions(olmv1alpha1.TypeFailedClusterRead, olmv1alpha1.TypeFailedClusterWrite),
-	//		updater.UnsetBundleInfo(),
-	//		updater.EnsureBundleDigest(""),
-	//	)
-	//	return ctrl.Result{}, fmt.Errorf("get digest: %v", err)
-	//}
-	//u.UpdateStatus(updater.EnsureBundleDigest(digest))
-	//
-	//ref, err := name.ParseReference(bundle.Spec.Image)
-	//if err != nil {
-	//	u.UpdateStatus(
-	//		updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeUnpacked,
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  olmv1alpha1.ReasonInvalidImageReference,
-	//			Message: err.Error(),
-	//		}),
-	//		updater.RemoveConditions(olmv1alpha1.TypeFailedClusterRead, olmv1alpha1.TypeFailedClusterWrite),
-	//		updater.UnsetBundleInfo(),
-	//	)
-	//	return ctrl.Result{}, fmt.Errorf("parse image reference: %v", err)
-	//}
-	//resolvedImage := fmt.Sprintf("%s@%s", ref.Context(), digest)
 
-	l.Info("updating bundle contents")
 	u.UpdateStatus(
 		updater.UnsetBundleInfo(),
 	)
 
 	l.Info("unpacking bundle")
-	if err := unpacker.Unpack(ctx); err != nil {
+	status, err := unpacker.Unpack(ctx)
+	if err != nil {
 		u.UpdateStatus(
 			updater.EnsureCondition(metav1.Condition{
 				Type:    olmv1alpha1.TypeUnpacked,
@@ -159,135 +96,18 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		return ctrl.Result{}, fmt.Errorf("unpack bundle: %v", err)
 	}
 
-	//version, err := rBundle.Version()
-	//if err != nil {
-	//	u.UpdateStatus(
-	//		updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeUnpacked,
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  olmv1alpha1.ReasonInvalidBundle,
-	//			Message: err.Error(),
-	//		}),
-	//	)
-	//	return ctrl.Result{}, fmt.Errorf("extract version from bundle: %v", err)
-	//}
-	u.UpdateStatus(updater.EnsureCondition(metav1.Condition{
-		Type:   olmv1alpha1.TypeUnpacked,
-		Status: metav1.ConditionTrue,
-		Reason: olmv1alpha1.ReasonUnpackSuccessful,
-	}))
-
-	//objs := []corev1.ObjectReference{}
-	//for _, obj := range rBundle.Objects {
-	//	objData, err := yaml.Marshal(obj)
-	//	if err != nil {
-	//		return ctrl.Result{}, fmt.Errorf("marshal object as YAML: %v", err)
-	//	}
-	//	hash := fmt.Sprintf("%x", sha256.Sum256(append([]byte(rBundle.Name), objData...)))
-	//	objCompressed := &bytes.Buffer{}
-	//	gzipper := gzip.NewWriter(objCompressed)
-	//	if _, err := gzipper.Write(objData); err != nil {
-	//		u.UpdateStatus(updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeFailedClusterWrite,
-	//			Status:  metav1.ConditionTrue,
-	//			Reason:  olmv1alpha1.ReasonReconcileConfigMapsFailed,
-	//			Message: err.Error(),
-	//		}))
-	//		return ctrl.Result{}, fmt.Errorf("gzip object data for configmap: %v", err)
-	//	}
-	//	if err := gzipper.Close(); err != nil {
-	//		u.UpdateStatus(updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeFailedClusterWrite,
-	//			Status:  metav1.ConditionTrue,
-	//			Reason:  olmv1alpha1.ReasonReconcileConfigMapsFailed,
-	//			Message: err.Error(),
-	//		}))
-	//		return ctrl.Result{}, fmt.Errorf("close gzip writer for configmap: %v", err)
-	//	}
-	//	immutable := true
-	//	cm := corev1.ConfigMap{
-	//		ObjectMeta: metav1.ObjectMeta{
-	//			Name:      fmt.Sprintf("bundle-object-%s-%s", rBundle.Package, hash[0:8]),
-	//			Namespace: "kuberpak-system",
-	//			Labels: map[string]string{
-	//				"kuberpak.io/bundle-name": bundle.Name,
-	//			},
-	//		},
-	//		Immutable: &immutable,
-	//		Data: map[string]string{
-	//			"bundle-image":  resolvedImage,
-	//			"object-sha256": hash,
-	//		},
-	//		BinaryData: map[string][]byte{
-	//			"object": objCompressed.Bytes(),
-	//		},
-	//	}
-	//	if err := controllerutil.SetControllerReference(bundle, &cm, r.Scheme); err != nil {
-	//		u.UpdateStatus(updater.EnsureCondition(metav1.Condition{
-	//			Type:    olmv1alpha1.TypeUnpacked,
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  olmv1alpha1.ReasonReconcileConfigMapsFailed,
-	//			Message: err.Error(),
-	//		}))
-	//		return ctrl.Result{}, fmt.Errorf("set owner reference on configmap: %v", err)
-	//	}
-	//	expectedConfigMaps = append(expectedConfigMaps, cm)
-	//	objs = append(objs, corev1.ObjectReference{
-	//		APIVersion: obj.GetAPIVersion(),
-	//		Kind:       obj.GetKind(),
-	//		Namespace:  obj.GetNamespace(),
-	//		Name:       obj.GetName(),
-	//	})
-	//}
-	//
-	//u.UpdateStatus(
-	//	updater.EnsureCondition(metav1.Condition{
-	//		Type:   olmv1alpha1.TypeFailedClusterWrite,
-	//		Status: metav1.ConditionFalse,
-	//		Reason: olmv1alpha1.ReasonClusterWriteSuccessful,
-	//	}),
-	//)
+	l.Info("updating bundle contents")
+	u.UpdateStatus(
+		updater.SetBundleInfo(status.Info),
+		updater.EnsureBundleDigest(status.Digest),
+		updater.EnsureCondition(metav1.Condition{
+			Type:   olmv1alpha1.TypeUnpacked,
+			Status: metav1.ConditionTrue,
+			Reason: olmv1alpha1.ReasonUnpackSuccessful,
+		}),
+	)
 
 	return ctrl.Result{}, nil
-}
-
-//
-//func (r *BundleReconciler) ensureExpectedConfigMaps(ctx context.Context, actual, expected []corev1.ConfigMap) error {
-//	existingCms := map[types.NamespacedName]corev1.ConfigMap{}
-//	for _, cm := range actual {
-//		key := types.NamespacedName{Namespace: cm.Namespace, Name: cm.Name}
-//		existingCms[key] = cm
-//	}
-//
-//	for _, cm := range expected {
-//		cm := cm
-//		key := types.NamespacedName{Namespace: cm.Namespace, Name: cm.Name}
-//		if ecm, ok := existingCms[key]; ok {
-//			if ecm.Data["kuberpak.io_object-sha256"] == cm.Data["kuberpak.io_object-sha256"] {
-//				delete(existingCms, key)
-//				continue
-//			}
-//			if err := r.Delete(ctx, &ecm); client.IgnoreNotFound(err) != nil {
-//				return fmt.Errorf("delete configmap: %v", err)
-//			}
-//		}
-//		if err := r.Client.Create(ctx, &cm); err != nil {
-//			return fmt.Errorf("create configmap: %v", err)
-//		}
-//	}
-//	for _, ecm := range existingCms {
-//		if err := r.Delete(ctx, &ecm); client.IgnoreNotFound(err) != nil {
-//			return fmt.Errorf("delete configmap: %v", err)
-//		}
-//	}
-//	return nil
-//}
-
-func bundleProvisionerFilter(provisionerClassName string) predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		b := obj.(*olmv1alpha1.Bundle)
-		return b.Spec.ProvisionerClassName == provisionerClassName
-	})
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -297,4 +117,11 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 128}).
 		Complete(r)
+}
+
+func bundleProvisionerFilter(provisionerClassName string) predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		b := obj.(*olmv1alpha1.Bundle)
+		return b.Spec.ProvisionerClassName == provisionerClassName
+	})
 }

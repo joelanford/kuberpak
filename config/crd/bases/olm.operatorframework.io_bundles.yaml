@@ -139,10 +139,43 @@ spec:
                 properties:
                   name:
                     type: string
+                  objects:
+                    items:
+                      properties:
+                        apiVersion:
+                          type: string
+                        configMapRef:
+                          description: LocalObjectReference contains enough information
+                            to let you locate the referenced object inside the same
+                            namespace.
+                          properties:
+                            name:
+                              description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                TODO: Add other useful fields. apiVersion, kind, uid?'
+                              type: string
+                          type: object
+                        kind:
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - apiVersion
+                      - configMapRef
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    type: array
                   package:
                     type: string
                   version:
                     type: string
+                required:
+                - name
+                - package
+                - version
                 type: object
               observedGeneration:
                 format: int64
