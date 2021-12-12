@@ -12,6 +12,7 @@ RUN go mod download
 # Copy the go source
 COPY cmd/unpack/ cmd/unpack
 COPY api/ api
+COPY internal/ internal
 
 # Build
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o unpack ./cmd/unpack/

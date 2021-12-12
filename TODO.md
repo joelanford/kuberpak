@@ -3,7 +3,10 @@
 - [ ] Make `Bundle` have immutable spec.
 - [ ] Make `const` for the name of the container whose image is the bundle image
       in the unpack pod.
-- [ ] Is there a way to prevent multiple reconciles and flapping between "Unpacking" and "Unpacked"?
+- [ ] Look into async unpacking (i.e. create pod and return, check pod and return,
+      when pod process completes, cleanup). This might help to prevent unnecessary reconciles
+      and pod runs.
+- [ ] Perhaps unpack pod should return serialized filesystem contents?
 
 # Questions
 

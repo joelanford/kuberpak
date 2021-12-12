@@ -1,10 +1,12 @@
 package unpack
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 
 	"golang.org/x/sync/errgroup"
@@ -18,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
+	"github.com/joelanford/kuberpak/internal/util"
 )
 
 type PodProvider struct {
@@ -46,7 +49,7 @@ type podUnpacker struct {
 	UnpackImage string
 }
 
-func (p podUnpacker) Unpack(ctx context.Context) (*olmv1alpha1.BundleStatus, error) {
+func (p podUnpacker) Unpack(ctx context.Context) (*corev1.ConfigMapList, error) {
 	imagePullSecrets, err := p.createImagePullSecrets(ctx, p.bundle)
 	if err != nil {
 		return nil, err
@@ -66,6 +69,13 @@ func (p podUnpacker) Unpack(ctx context.Context) (*olmv1alpha1.BundleStatus, err
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 
 	err = p.waitForPodCompletion(ctx, pod)
+
+	expectedConfigMapsData, err := p.getPodLogs(ctx, pod)
+	expectedConfigMaps := &corev1.ConfigMapList{}
+	if err := json.Unmarshal(expectedConfigMapsData, expectedConfigMaps); err != nil {
+		return nil, err
+	}
+
 	if deleteErr := p.ensurePodDeletion(ctx, pod); deleteErr != nil {
 		return nil, deleteErr
 	}
@@ -80,43 +90,7 @@ func (p podUnpacker) Unpack(ctx context.Context) (*olmv1alpha1.BundleStatus, err
 		}
 	}
 
-	cm := &corev1.ConfigMap{}
-	cmKey := types.NamespacedName{Namespace: p.Namespace, Name: fmt.Sprintf("bundle-metadata-%s", p.bundle.Name)}
-	if err := p.Get(ctx, cmKey, cm); err != nil {
-		return nil, fmt.Errorf("get bundle metadata configmap: %v", err)
-	}
-
-	bundleStatus := &olmv1alpha1.BundleStatus{
-		Info: &olmv1alpha1.BundleInfo{
-			Package: cm.Data["package-name"],
-			Name:    cm.Data["bundle-name"],
-			Version: cm.Data["bundle-version"],
-		},
-		Digest: cm.Data["bundle-image"],
-	}
-
-	cmNames := []string{}
-	if err := json.Unmarshal([]byte(cm.Data["objects"]), &cmNames); err != nil {
-		return nil, fmt.Errorf("unmarshal object refs from metadata configmap: %v", err)
-	}
-
-	sort.Strings(cmNames)
-	for _, cmName := range cmNames {
-		cm := &corev1.ConfigMap{}
-		cmKey := types.NamespacedName{Namespace: p.Namespace, Name: cmName}
-		if err := p.Get(ctx, cmKey, cm); err != nil {
-			return nil, fmt.Errorf("get object configmap: %v", err)
-		}
-		bundleStatus.Info.Objects = append(bundleStatus.Info.Objects, olmv1alpha1.BundleObject{
-			APIVersion:   cm.Data["object-apiversion"],
-			Kind:         cm.Data["object-kind"],
-			Name:         cm.Data["object-name"],
-			Namespace:    cm.Data["object-namespace"],
-			ConfigMapRef: corev1.LocalObjectReference{Name: cmName},
-		})
-	}
-
-	return bundleStatus, nil
+	return expectedConfigMaps, nil
 }
 
 func (p podUnpacker) createImagePullSecrets(ctx context.Context, bundle *olmv1alpha1.Bundle) ([]corev1.Secret, error) {
@@ -168,12 +142,6 @@ func (p *podUnpacker) ensurePodDeletion(ctx context.Context, pod *corev1.Pod) er
 	return g.Wait()
 }
 
-func getLabels(bundle *olmv1alpha1.Bundle) map[string]string {
-	return map[string]string{
-		"kuberpak.io/bundle-name": bundle.Name,
-	}
-}
-
 func deriveName(b *olmv1alpha1.Bundle) string {
 	return fmt.Sprintf("kuberpak-unpack-bundle-%s", b.Name)
 }
@@ -192,7 +160,7 @@ func (p podUnpacker) pod(bundle *olmv1alpha1.Bundle, imagePullSecrets []corev1.S
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            deriveName(bundle),
 			Namespace:       p.Namespace,
-			Labels:          getLabels(bundle),
+			Labels:          util.BundleLabels(bundle.Name),
 			OwnerReferences: []metav1.OwnerReference{*controllerRef},
 		},
 		Spec: corev1.PodSpec{
@@ -231,7 +199,7 @@ func (p podUnpacker) pod(bundle *olmv1alpha1.Bundle, imagePullSecrets []corev1.S
 					Args: []string{
 						fmt.Sprintf("--bundle-name=%s", p.bundle.Name),
 						"--pod-name=$(POD_NAME)",
-						"--namespace=$(POD_NAMESPACE)",
+						"--pod-namespace=$(POD_NAMESPACE)",
 						"--bundle-dir=/bundle",
 					},
 					Env: []corev1.EnvVar{
@@ -285,8 +253,11 @@ loop:
 				case corev1.PodSucceeded:
 					break loop
 				case corev1.PodFailed:
-					// TODO: get pod logs
-					return fmt.Errorf("unpack pod failed")
+					podLogs, err := p.getPodLogs(ctx, pod)
+					if err != nil {
+						return fmt.Errorf("unpack pod failed: failed to retrieve pod logs: %v", err)
+					}
+					return fmt.Errorf("unpack pod failed: %s", string(podLogs))
 				}
 				for _, cStatus := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
 					if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ErrImagePull" {
@@ -299,7 +270,7 @@ loop:
 			case watch.Deleted:
 				return fmt.Errorf("pod %q was deleted prior to completion", pod.Name)
 			case watch.Error:
-				return fmt.Errorf("%s", evt.Object)
+				return fmt.Errorf("watch error: %s", evt.Object)
 			}
 		case <-ctx.Done():
 			// TODO: get pod events/conditions
@@ -337,4 +308,17 @@ func (p *podUnpacker) waitForPodDeletion(ctx context.Context, pod *corev1.Pod, w
 			return ctx.Err()
 		}
 	}
+}
+
+func (p podUnpacker) getPodLogs(ctx context.Context, pod *corev1.Pod) ([]byte, error) {
+	logReader, err := p.KubeClient.CoreV1().Pods(p.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer logReader.Close()
+	buf := &bytes.Buffer{}
+	if _, err := io.Copy(buf, logReader); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

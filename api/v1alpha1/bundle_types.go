@@ -50,7 +50,6 @@ type ImagePullSecret struct {
 
 // BundleStatus defines the observed state of Bundle
 type BundleStatus struct {
-	Phase              string             `json:"phase,omitempty"`
 	Info               *BundleInfo        `json:"info,omitempty"`
 	Digest             string             `json:"digest,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
@@ -76,9 +75,7 @@ type BundleObject struct {
 //+kubebuilder:resource:scope=Cluster
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name=Image,type=string,JSONPath=`.spec.image`
-//+kubebuilder:printcolumn:name=Phase,type=string,JSONPath=`.status.phase`
-//+kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-//
+//+kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Bundle is the Schema for the bundles API
 type Bundle struct {

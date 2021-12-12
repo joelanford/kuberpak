@@ -71,16 +71,6 @@ func EnsureCondition(condition metav1.Condition) UpdateStatusFunc {
 	}
 }
 
-func SetPhase(phase string) UpdateStatusFunc {
-	return func(status *olmv1alpha1.BundleStatus) bool {
-		if status.Phase == phase {
-			return false
-		}
-		status.Phase = phase
-		return true
-	}
-}
-
 func RemoveConditions(types ...olmv1alpha1.BundleConditionType) UpdateStatusFunc {
 	return func(status *olmv1alpha1.BundleStatus) bool {
 		updated := false
