@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
 )
@@ -57,6 +58,7 @@ func (u *Updater) Apply(ctx context.Context, b *olmv1alpha1.Bundle) error {
 			needsStatusUpdate = f(&b.Status) || needsStatusUpdate
 		}
 		if needsStatusUpdate {
+			log.FromContext(ctx).Info("applying status changes")
 			return u.client.Status().Update(ctx, b)
 		}
 		return nil
@@ -67,22 +69,12 @@ func EnsureCondition(condition metav1.Condition) UpdateStatusFunc {
 	return func(status *olmv1alpha1.BundleStatus) bool {
 		existing := meta.FindStatusCondition(status.Conditions, condition.Type)
 		meta.SetStatusCondition(&status.Conditions, condition)
-		return existing == nil || *existing != condition
+		return existing == nil || !conditionsSemanticallyEqual(*existing, condition)
 	}
 }
 
-func RemoveConditions(types ...olmv1alpha1.BundleConditionType) UpdateStatusFunc {
-	return func(status *olmv1alpha1.BundleStatus) bool {
-		updated := false
-		for _, t := range types {
-			existing := meta.FindStatusCondition(status.Conditions, string(t))
-			if existing != nil {
-				meta.RemoveStatusCondition(&status.Conditions, string(t))
-				updated = true
-			}
-		}
-		return updated
-	}
+func conditionsSemanticallyEqual(a, b metav1.Condition) bool {
+	return a.Type == b.Type && a.Status == b.Status && a.Reason == b.Reason && a.Message == b.Message && a.ObservedGeneration == b.ObservedGeneration
 }
 
 func EnsureObservedGeneration(observedGeneration int64) UpdateStatusFunc {
