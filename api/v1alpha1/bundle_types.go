@@ -26,8 +26,15 @@ type BundleConditionType string
 const (
 	TypeUnpacked = "Unpacked"
 
+	ReasonUnpackPending    = "UnpackPending"
+	ReasonUnpacking        = "Unpacking"
 	ReasonUnpackSuccessful = "UnpackSuccessful"
 	ReasonUnpackFailed     = "UnpackFailed"
+
+	PhasePending   = "Pending"
+	PhaseUnpacking = "Unpacking"
+	PhaseFailing   = "Failing"
+	PhaseUnpacked  = "Unpacked"
 )
 
 // BundleSpec defines the desired state of Bundle
@@ -51,6 +58,7 @@ type ImagePullSecret struct {
 // BundleStatus defines the observed state of Bundle
 type BundleStatus struct {
 	Info               *BundleInfo        `json:"info,omitempty"`
+	Phase              string             `json:"phase,omitempty"`
 	Digest             string             `json:"digest,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
@@ -75,6 +83,7 @@ type BundleObject struct {
 //+kubebuilder:resource:scope=Cluster
 //+kubebuilder:subresource:status
 //+kubebuilder:printcolumn:name=Image,type=string,JSONPath=`.spec.image`
+//+kubebuilder:printcolumn:name=Phase,type=string,JSONPath=`.status.phase`
 //+kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Bundle is the Schema for the bundles API

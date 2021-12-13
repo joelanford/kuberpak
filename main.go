@@ -31,7 +31,6 @@ import (
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
 	"github.com/joelanford/kuberpak/controllers"
-	"github.com/joelanford/kuberpak/pkg/unpack"
 )
 
 var (
@@ -69,6 +68,11 @@ func main() {
 	}
 
 	cfg := ctrl.GetConfigOrDie()
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create kubernetes client")
+		os.Exit(1)
+	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		MetricsBindAddress:     metricsAddr,
@@ -82,17 +86,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	unpackerProvider := unpack.PodProvider{
-		Client:      mgr.GetClient(),
-		KubeClient:  kubernetes.NewForConfigOrDie(cfg),
-		Namespace:   "kuberpak-system",
-		UnpackImage: "quay.io/joelanford/kuberpak-unpack:v0.1.0",
-	}
-
 	if err = (&controllers.BundleReconciler{
-		Client:      mgr.GetClient(),
-		Scheme:      mgr.GetScheme(),
-		GetUnpacker: unpackerProvider.NewPod,
+		Client:     mgr.GetClient(),
+		KubeClient: kubeClient,
+		Scheme:     mgr.GetScheme(),
+		// TODO: derive pod namespace from the pod that this process is running in.
+		PodNamespace: "kuberpak-system",
+		UnpackImage:  "quay.io/joelanford/kuberpak-unpack:v0.1.0",
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bundle")
 		os.Exit(1)

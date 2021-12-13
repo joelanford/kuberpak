@@ -118,3 +118,13 @@ func SetBundleInfo(info *olmv1alpha1.BundleInfo) UpdateStatusFunc {
 		return true
 	}
 }
+
+func SetPhase(phase string) UpdateStatusFunc {
+	return func(status *olmv1alpha1.BundleStatus) bool {
+		if status.Phase == phase {
+			return false
+		}
+		status.Phase = phase
+		return true
+	}
+}
