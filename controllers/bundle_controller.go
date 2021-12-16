@@ -657,7 +657,7 @@ func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Pod{}).
 		Owns(&corev1.ConfigMap{}).
-		Watches(&source.Kind{Type: &corev1.Secret{}}, remoteSecretHandler(mgr.GetClient(), mgr.GetLogger())).
+		Watches(&source.Kind{Type: &corev1.Secret{}}, mapSecretToBundleHandler(mgr.GetClient(), mgr.GetLogger())).
 		Complete(r)
 }
 
@@ -668,13 +668,13 @@ func bundleProvisionerFilter(provisionerClassName string) predicate.Predicate {
 	})
 }
 
-func remoteSecretHandler(cl client.Client, log logr.Logger) handler.EventHandler {
+func mapSecretToBundleHandler(cl client.Client, log logr.Logger) handler.EventHandler {
 	return handler.EnqueueRequestsFromMapFunc(func(object client.Object) []reconcile.Request {
 		secret := object.(*corev1.Secret)
 		bundles := &olmv1alpha1.BundleList{}
 		var requests []reconcile.Request
 		if err := cl.List(context.Background(), bundles); err != nil {
-			log.WithName("remoteSecretHandler").Error(err, "list bundles")
+			log.WithName("mapSecretToBundleHandler").Error(err, "list bundles")
 			return requests
 		}
 		for _, b := range bundles.Items {

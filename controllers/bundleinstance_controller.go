@@ -25,6 +25,7 @@ import (
 	"io/ioutil"
 	"sort"
 
+	"github.com/go-logr/logr"
 	helmclient "github.com/operator-framework/helm-operator-plugins/pkg/client"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/storage/driver"
@@ -38,8 +39,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	"sigs.k8s.io/yaml"
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
@@ -87,6 +91,9 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			Message: err.Error(),
 		})
 		return ctrl.Result{}, err
+	}
+	if b.Status.Phase != olmv1alpha1.PhaseUnpacked {
+		return ctrl.Result{}, nil
 	}
 
 	objectConfigMaps := &corev1.ConfigMapList{}
@@ -155,7 +162,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 		chrt.Templates = append(chrt.Templates, &chart.File{
-			Name: fmt.Sprintf("manifest-%d", i),
+			Name: fmt.Sprintf("manifest-%d.yaml", i),
 			Data: objData,
 		})
 	}
@@ -195,5 +202,25 @@ func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.ActionClientGetter = helmclient.NewActionClientGetter(r.ActionConfigGetter)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&olmv1alpha1.BundleInstance{}, builder.WithPredicates(bundleInstanceProvisionerFilter("kuberpak.io/registry+v1"))).
+		Watches(&source.Kind{Type: &olmv1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(mapBundleToBundleInstanceHandler(mgr.GetClient(), mgr.GetLogger()))).
 		Complete(r)
+}
+
+func mapBundleToBundleInstanceHandler(cl client.Client, log logr.Logger) handler.MapFunc {
+	return func(object client.Object) []reconcile.Request {
+		b := object.(*olmv1alpha1.Bundle)
+		bundleInstances := &olmv1alpha1.BundleInstanceList{}
+		var requests []reconcile.Request
+		if err := cl.List(context.Background(), bundleInstances); err != nil {
+			log.WithName("mapBundleToBundleInstanceHandler").Error(err, "list bundles")
+			return requests
+		}
+		for _, bi := range bundleInstances.Items {
+			bi := bi
+			if bi.Spec.BundleName == b.Name {
+				requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&bi)})
+			}
+		}
+		return requests
+	}
 }
