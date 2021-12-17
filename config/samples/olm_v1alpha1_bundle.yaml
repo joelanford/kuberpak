@@ -5,10 +5,7 @@ metadata:
   name: example-operator-0.1.0-1
 spec:
   provisionerClassName: kuberpak.io/registry+v1
-  image: quay.io/joelanford/secret-operator-bundle:0.1.0
-  imagePullSecrets:
-  - namespace: default
-    name: image-pull-secret
+  image: quay.io/joelanford/example-operator-bundle:0.1.0
 ---
 apiVersion: olm.operatorframework.io/v1alpha1
 kind: Bundle
@@ -16,4 +13,7 @@ metadata:
   name: example-operator-0.1.0-2
 spec:
   provisionerClassName: kuberpak.io/registry+v1
-  image: quay.io/joelanford/example-operator-bundle:0.1.0
+  image: quay.io/joelanford/secret-operator-bundle:0.1.0
+  imagePullSecrets:
+  - namespace: default
+    name: image-pull-secret

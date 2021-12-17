@@ -6,4 +6,4 @@ metadata:
     kuberpak.io/install-namespace: default
 spec:
   provisionerClassName: kuberpak.io/registry+v1
-  bundleName: bundle-sample1
+  bundleName: example-operator-0.1.0-1

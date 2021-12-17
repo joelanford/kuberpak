@@ -495,7 +495,7 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 	immutable := true
 	controllerRef := metav1.NewControllerRef(bundle, bundle.GroupVersionKind())
 	for _, obj := range objects {
-		objData, err := yaml.Marshal(obj)
+		objData, err := yaml.Marshal(obj.Object)
 		if err != nil {
 			return nil, err
 		}
@@ -509,11 +509,13 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 			return nil, fmt.Errorf("close gzip writer: %v", err)
 		}
 		apiVersion, kind := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
+		labels := util.BundleLabels(bundle.Name)
+		labels["kuberpak.io/configmap-type"] = "object"
 		cm := corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            fmt.Sprintf("bundle-object-%s-%s", bundle.Name, hash[0:8]),
 				Namespace:       r.PodNamespace,
-				Labels:          util.BundleLabels(bundle.Name),
+				Labels:          labels,
 				OwnerReferences: []metav1.OwnerReference{*controllerRef},
 			},
 			Immutable: &immutable,
@@ -542,6 +544,8 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 	if err != nil {
 		return nil, fmt.Errorf("marshal object configmap names as json: %v", err)
 	}
+	labels := util.BundleLabels(bundle.Name)
+	labels["kuberpak.io/configmap-type"] = "metadata"
 	metadataCm := corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            fmt.Sprintf("bundle-metadata-%s", bundle.Name),

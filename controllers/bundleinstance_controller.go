@@ -97,7 +97,10 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	objectConfigMaps := &corev1.ConfigMapList{}
-	listOpts := []client.ListOption{client.InNamespace("kuberpak-system"), client.MatchingLabels{"kuberpak.io/bundle-name": b.Name}}
+	listOpts := []client.ListOption{client.InNamespace("kuberpak-system"), client.MatchingLabels{
+		"kuberpak.io/bundle-name":    b.Name,
+		"kuberpak.io/configmap-type": "object",
+	}}
 	if err := r.List(ctx, objectConfigMaps, listOpts...); err != nil {
 		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
 			Type:    "Installed",
