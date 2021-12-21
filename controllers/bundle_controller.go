@@ -38,6 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	apimachyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
@@ -478,7 +479,7 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 
 	var (
 		pkgName       = annotations.PackageName
-		bundleName    string
+		csvName       string
 		bundleVersion string
 	)
 
@@ -488,7 +489,7 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 				bundleVersion = v
 			}
 			if v, found, err := unstructured.NestedString(obj.Object, "metadata", "name"); found && err == nil {
-				bundleName = v
+				csvName = v
 			}
 		}
 	}
@@ -508,9 +509,18 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 		if err := gzipper.Close(); err != nil {
 			return nil, fmt.Errorf("close gzip writer: %v", err)
 		}
-		apiVersion, kind := obj.GetObjectKind().GroupVersionKind().ToAPIVersionAndKind()
-		labels := util.BundleLabels(bundle.Name)
-		labels["kuberpak.io/configmap-type"] = "object"
+		gvk := obj.GetObjectKind().GroupVersionKind()
+		labels := mergeMaps(util.BundleLabels(bundle.Name), map[string]string{
+			"kuberpak.io/configmap-type":   "object",
+			"kuberpak.io/package-name":     pkgName,
+			"kuberpak.io/csv-name":         csvName,
+			"kuberpak.io/bundle-version":   bundleVersion,
+			"kuberpak.io/object-group":     gvk.Group,
+			"kuberpak.io/object-version":   gvk.Version,
+			"kuberpak.io/object-kind":      gvk.Kind,
+			"kuberpak.io/object-name":      obj.GetName(),
+			"kuberpak.io/object-namespace": obj.GetNamespace(),
+		})
 		cm := corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            fmt.Sprintf("bundle-object-%s-%s", bundle.Name, hash[0:8]),
@@ -520,15 +530,8 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 			},
 			Immutable: &immutable,
 			Data: map[string]string{
-				"package-name":      pkgName,
-				"bundle-image":      resolvedImage,
-				"bundle-name":       bundleName,
-				"bundle-version":    bundleVersion,
-				"object-sha256":     hash,
-				"object-kind":       kind,
-				"object-apiversion": apiVersion,
-				"object-name":       obj.GetName(),
-				"object-namespace":  obj.GetNamespace(),
+				"bundle-image":  resolvedImage,
+				"object-sha256": hash,
 			},
 			BinaryData: map[string][]byte{
 				"object": objCompressed.Bytes(),
@@ -544,22 +547,23 @@ func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, reso
 	if err != nil {
 		return nil, fmt.Errorf("marshal object configmap names as json: %v", err)
 	}
-	labels := util.BundleLabels(bundle.Name)
-	labels["kuberpak.io/configmap-type"] = "metadata"
+	labels := mergeMaps(util.BundleLabels(bundle.Name), map[string]string{
+		"kuberpak.io/configmap-type": "metadata",
+		"kuberpak.io/package-name":   pkgName,
+		"kuberpak.io/csv-name":       csvName,
+		"kuberpak.io/bundle-version": bundleVersion,
+	})
 	metadataCm := corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            fmt.Sprintf("bundle-metadata-%s", bundle.Name),
 			Namespace:       r.PodNamespace,
-			Labels:          util.BundleLabels(bundle.Name),
+			Labels:          labels,
 			OwnerReferences: []metav1.OwnerReference{*controllerRef},
 		},
 		Immutable: &immutable,
 		Data: map[string]string{
-			"objects":        string(ocmJson),
-			"package-name":   pkgName,
-			"bundle-image":   resolvedImage,
-			"bundle-name":    bundleName,
-			"bundle-version": bundleVersion,
+			"objects":      string(ocmJson),
+			"bundle-image": resolvedImage,
 		},
 	}
 	cmList := &corev1.ConfigMapList{
@@ -622,9 +626,9 @@ func statusFromDesiredConfigMaps(bundle *olmv1alpha1.Bundle, desiredConfigMaps [
 
 	bundleStatus := &olmv1alpha1.BundleStatus{
 		Info: &olmv1alpha1.BundleInfo{
-			Package: metadataCm.Data["package-name"],
-			Name:    metadataCm.Data["bundle-name"],
-			Version: metadataCm.Data["bundle-version"],
+			Package: metadataCm.Labels["kuberpak.io/package-name"],
+			Name:    metadataCm.Labels["kuberpak.io/csv-name"],
+			Version: metadataCm.Labels["kuberpak.io/bundle-version"],
 		},
 		Digest: metadataCm.Data["bundle-image"],
 	}
@@ -640,11 +644,17 @@ func statusFromDesiredConfigMaps(bundle *olmv1alpha1.Bundle, desiredConfigMaps [
 		if !ok {
 			return nil, fmt.Errorf("cannot find object config map %q in list of desired config maps", cmName)
 		}
+		gvk := schema.GroupVersionKind{
+			Group:   cm.Labels["kuberpak.io/object-group"],
+			Version: cm.Labels["kuberpak.io/object-version"],
+			Kind:    cm.Labels["kuberpak.io/object-kind"],
+		}
+
 		bundleStatus.Info.Objects = append(bundleStatus.Info.Objects, olmv1alpha1.BundleObject{
-			APIVersion:   cm.Data["object-apiversion"],
-			Kind:         cm.Data["object-kind"],
-			Name:         cm.Data["object-name"],
-			Namespace:    cm.Data["object-namespace"],
+			APIVersion:   gvk.GroupVersion().String(),
+			Kind:         gvk.Kind,
+			Name:         cm.Labels["kuberpak.io/object-name"],
+			Namespace:    cm.Labels["kuberpak.io/object-namespace"],
 			ConfigMapRef: corev1.LocalObjectReference{Name: cmName},
 		})
 	}
@@ -691,4 +701,14 @@ func mapSecretToBundleHandler(cl client.Client, log logr.Logger) handler.EventHa
 		}
 		return requests
 	})
+}
+
+func mergeMaps(maps ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
 }

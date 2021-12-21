@@ -21,6 +21,7 @@ import (
 	"os"
 
 	openshiftv1alpha1 "github.com/openshift/api/operator/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -40,7 +41,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	utilruntime.Must(olmv1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
@@ -98,8 +99,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controllers.BundleInstanceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		PodNamespace: "kuberpak-system",
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BundleInstance")
 		os.Exit(1)
