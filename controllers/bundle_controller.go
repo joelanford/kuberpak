@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -38,7 +37,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	apimachyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
@@ -54,6 +52,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
+	"github.com/joelanford/kuberpak/internal/storage"
 	"github.com/joelanford/kuberpak/internal/updater"
 	"github.com/joelanford/kuberpak/internal/util"
 )
@@ -63,6 +62,7 @@ type BundleReconciler struct {
 	client.Client
 	KubeClient kubernetes.Interface
 	Scheme     *runtime.Scheme
+	Storage    storage.Storage
 
 	PodNamespace string
 	UnpackImage  string
@@ -365,23 +365,39 @@ func (r *BundleReconciler) handleCompletedPod(ctx context.Context, bundle *olmv1
 		return nil, fmt.Errorf("get objects from bundle manifests: %v", err)
 	}
 
-	desiredConfigMaps, err := r.getDesiredConfigMaps(bundle, bundleImageDigest, annotations, objects)
-	if err != nil {
-		return nil, fmt.Errorf("get desired configmaps: %v", err)
+	if err := r.Storage.Store(ctx, bundle, objects); err != nil {
+		return nil, fmt.Errorf("persist bundle objects: %v", err)
 	}
 
-	actualConfigMaps := &corev1.ConfigMapList{}
-	if err := r.List(ctx, actualConfigMaps, client.MatchingLabels(util.BundleLabels(bundle.Name)), client.InNamespace(r.PodNamespace)); err != nil {
-		return nil, fmt.Errorf("list actual configmaps: %v", err)
+	var (
+		csvName string
+		version string
+	)
+	bundleObjects := []olmv1alpha1.BundleObject{}
+	for _, obj := range objects {
+		if obj.GetObjectKind().GroupVersionKind().Kind == "ClusterServiceVersion" {
+			csvName = obj.GetName()
+			u := obj.(*unstructured.Unstructured)
+			version, _, _ = unstructured.NestedString(u.Object, "spec", "version")
+		}
+		gvk := obj.GetObjectKind().GroupVersionKind()
+		bundleObjects = append(bundleObjects, olmv1alpha1.BundleObject{
+			Group:     gvk.Group,
+			Version:   gvk.Version,
+			Kind:      gvk.Kind,
+			Name:      obj.GetName(),
+			Namespace: obj.GetNamespace(),
+		})
 	}
 
-	if err := r.ensureDesiredConfigMaps(ctx, actualConfigMaps.Items, desiredConfigMaps.Items); err != nil {
-		return nil, fmt.Errorf("ensure desired configmaps: %v", err)
-	}
-
-	st, err := statusFromDesiredConfigMaps(bundle, desiredConfigMaps.Items)
-	if err != nil {
-		return nil, fmt.Errorf("derive status update from desired configmaps: %v", err)
+	st := &olmv1alpha1.BundleStatus{
+		Digest: bundleImageDigest,
+		Info: &olmv1alpha1.BundleInfo{
+			Package: annotations.PackageName,
+			Name:    csvName,
+			Version: version,
+			Objects: bundleObjects,
+		},
 	}
 	return st, nil
 }
@@ -442,8 +458,8 @@ func getAnnotations(bundleFS fs.FS) (*registry.Annotations, error) {
 	return &annotationsFile.Annotations, nil
 }
 
-func getObjects(bundleFS fs.FS) ([]unstructured.Unstructured, error) {
-	var objects []unstructured.Unstructured
+func getObjects(bundleFS fs.FS) ([]client.Object, error) {
+	var objects []client.Object
 	const manifestsDir = "manifests"
 
 	entries, err := fs.ReadDir(bundleFS, manifestsDir)
@@ -468,198 +484,10 @@ func getObjects(bundleFS fs.FS) ([]unstructured.Unstructured, error) {
 			} else if err != nil {
 				return nil, err
 			}
-			objects = append(objects, obj)
+			objects = append(objects, &obj)
 		}
 	}
 	return objects, nil
-}
-
-func (r *BundleReconciler) getDesiredConfigMaps(bundle *olmv1alpha1.Bundle, resolvedImage string, annotations *registry.Annotations, objects []unstructured.Unstructured) (*corev1.ConfigMapList, error) {
-	var desiredConfigMaps []corev1.ConfigMap
-
-	var (
-		pkgName       = annotations.PackageName
-		csvName       string
-		bundleVersion string
-	)
-
-	for _, obj := range objects {
-		if obj.GetObjectKind().GroupVersionKind().Kind == "ClusterServiceVersion" {
-			if v, found, err := unstructured.NestedString(obj.Object, "spec", "version"); found && err == nil {
-				bundleVersion = v
-			}
-			if v, found, err := unstructured.NestedString(obj.Object, "metadata", "name"); found && err == nil {
-				csvName = v
-			}
-		}
-	}
-	immutable := true
-	controllerRef := metav1.NewControllerRef(bundle, bundle.GroupVersionKind())
-	for _, obj := range objects {
-		objData, err := yaml.Marshal(obj.Object)
-		if err != nil {
-			return nil, err
-		}
-		hash := fmt.Sprintf("%x", sha256.Sum256(objData))
-		objCompressed := &bytes.Buffer{}
-		gzipper := gzip.NewWriter(objCompressed)
-		if _, err := gzipper.Write(objData); err != nil {
-			return nil, fmt.Errorf("gzip object data: %v", err)
-		}
-		if err := gzipper.Close(); err != nil {
-			return nil, fmt.Errorf("close gzip writer: %v", err)
-		}
-		gvk := obj.GetObjectKind().GroupVersionKind()
-		labels := mergeMaps(util.BundleLabels(bundle.Name), map[string]string{
-			"kuberpak.io/configmap-type":   "object",
-			"kuberpak.io/package-name":     pkgName,
-			"kuberpak.io/csv-name":         csvName,
-			"kuberpak.io/bundle-version":   bundleVersion,
-			"kuberpak.io/object-group":     gvk.Group,
-			"kuberpak.io/object-version":   gvk.Version,
-			"kuberpak.io/object-kind":      gvk.Kind,
-			"kuberpak.io/object-name":      obj.GetName(),
-			"kuberpak.io/object-namespace": obj.GetNamespace(),
-		})
-		cm := corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:            fmt.Sprintf("bundle-object-%s-%s", bundle.Name, hash[0:8]),
-				Namespace:       r.PodNamespace,
-				Labels:          labels,
-				OwnerReferences: []metav1.OwnerReference{*controllerRef},
-			},
-			Immutable: &immutable,
-			Data: map[string]string{
-				"bundle-image":  resolvedImage,
-				"object-sha256": hash,
-			},
-			BinaryData: map[string][]byte{
-				"object": objCompressed.Bytes(),
-			},
-		}
-		desiredConfigMaps = append(desiredConfigMaps, cm)
-	}
-	objectConfigMaps := []string{}
-	for _, dcm := range desiredConfigMaps {
-		objectConfigMaps = append(objectConfigMaps, dcm.Name)
-	}
-	ocmJson, err := json.Marshal(objectConfigMaps)
-	if err != nil {
-		return nil, fmt.Errorf("marshal object configmap names as json: %v", err)
-	}
-	labels := mergeMaps(util.BundleLabels(bundle.Name), map[string]string{
-		"kuberpak.io/configmap-type": "metadata",
-		"kuberpak.io/package-name":   pkgName,
-		"kuberpak.io/csv-name":       csvName,
-		"kuberpak.io/bundle-version": bundleVersion,
-	})
-	metadataCm := corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            fmt.Sprintf("bundle-metadata-%s", bundle.Name),
-			Namespace:       r.PodNamespace,
-			Labels:          labels,
-			OwnerReferences: []metav1.OwnerReference{*controllerRef},
-		},
-		Immutable: &immutable,
-		Data: map[string]string{
-			"objects":      string(ocmJson),
-			"bundle-image": resolvedImage,
-		},
-	}
-	cmList := &corev1.ConfigMapList{
-		Items: append(desiredConfigMaps, metadataCm),
-	}
-	return cmList, nil
-}
-
-func (r *BundleReconciler) ensureDesiredConfigMaps(ctx context.Context, actual, desired []corev1.ConfigMap) error {
-	l := log.FromContext(ctx)
-
-	actualCms := map[types.NamespacedName]corev1.ConfigMap{}
-	for _, cm := range actual {
-		key := types.NamespacedName{Namespace: cm.Namespace, Name: cm.Name}
-		actualCms[key] = cm
-	}
-
-	for _, cm := range desired {
-		cm := cm
-		key := types.NamespacedName{Namespace: cm.Namespace, Name: cm.Name}
-		if acm, ok := actualCms[key]; ok {
-			if util.ConfigMapsEqual(acm, cm) {
-				l.V(2).Info("found desired configmap, skipping", "name", acm.Name)
-				delete(actualCms, key)
-				continue
-			}
-		}
-		acm := &corev1.ConfigMap{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(&cm), acm); err == nil {
-			l.V(2).Info("configmap needs update, deleting", "name", acm.Name)
-			if err := r.Delete(ctx, acm); client.IgnoreNotFound(err) != nil {
-				return fmt.Errorf("delete configmap: %v", err)
-			}
-		}
-		l.V(2).Info("creating desired configmap", "name", cm.Name)
-		if err := r.Create(ctx, &cm); err != nil {
-			return fmt.Errorf("create configmap: %v", err)
-		}
-	}
-	for _, acm := range actualCms {
-		l.V(2).Info("deleting undesired configmap", "name", acm.Name)
-		if err := r.Delete(ctx, &acm); client.IgnoreNotFound(err) != nil {
-			return fmt.Errorf("delete configmap: %v", err)
-		}
-	}
-	return nil
-}
-
-func statusFromDesiredConfigMaps(bundle *olmv1alpha1.Bundle, desiredConfigMaps []corev1.ConfigMap) (*olmv1alpha1.BundleStatus, error) {
-	configMaps := map[string]corev1.ConfigMap{}
-	for _, cm := range desiredConfigMaps {
-		configMaps[cm.Name] = cm
-	}
-
-	metadataConfigMapName := util.MetadataConfigMapName(bundle.Name)
-	metadataCm, ok := configMaps[metadataConfigMapName]
-	if !ok {
-		return nil, fmt.Errorf("cannot find metadata config map %q in list of desired config maps", metadataConfigMapName)
-	}
-
-	bundleStatus := &olmv1alpha1.BundleStatus{
-		Info: &olmv1alpha1.BundleInfo{
-			Package: metadataCm.Labels["kuberpak.io/package-name"],
-			Name:    metadataCm.Labels["kuberpak.io/csv-name"],
-			Version: metadataCm.Labels["kuberpak.io/bundle-version"],
-		},
-		Digest: metadataCm.Data["bundle-image"],
-	}
-
-	cmNames := []string{}
-	if err := json.Unmarshal([]byte(metadataCm.Data["objects"]), &cmNames); err != nil {
-		return nil, fmt.Errorf("unmarshal object refs from metadata configmap: %v", err)
-	}
-
-	sort.Strings(cmNames)
-	for _, cmName := range cmNames {
-		cm, ok := configMaps[cmName]
-		if !ok {
-			return nil, fmt.Errorf("cannot find object config map %q in list of desired config maps", cmName)
-		}
-		gvk := schema.GroupVersionKind{
-			Group:   cm.Labels["kuberpak.io/object-group"],
-			Version: cm.Labels["kuberpak.io/object-version"],
-			Kind:    cm.Labels["kuberpak.io/object-kind"],
-		}
-
-		bundleStatus.Info.Objects = append(bundleStatus.Info.Objects, olmv1alpha1.BundleObject{
-			APIVersion:   gvk.GroupVersion().String(),
-			Kind:         gvk.Kind,
-			Name:         cm.Labels["kuberpak.io/object-name"],
-			Namespace:    cm.Labels["kuberpak.io/object-namespace"],
-			ConfigMapRef: corev1.LocalObjectReference{Name: cmName},
-		})
-	}
-
-	return bundleStatus, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -701,14 +529,4 @@ func mapSecretToBundleHandler(cl client.Client, log logr.Logger) handler.EventHa
 		}
 		return requests
 	})
-}
-
-func mergeMaps(maps ...map[string]string) map[string]string {
-	out := map[string]string{}
-	for _, m := range maps {
-		for k, v := range m {
-			out[k] = v
-		}
-	}
-	return out
 }

@@ -32,6 +32,7 @@ import (
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
 	"github.com/joelanford/kuberpak/controllers"
+	"github.com/joelanford/kuberpak/internal/storage"
 )
 
 var (
@@ -87,21 +88,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.BundleReconciler{
+	// TODO: derive pod namespace from the pod that this process is running in.
+	ns := "kuberpak-system"
+
+	bundleStorage := &storage.ConfigMaps{
 		Client:     mgr.GetClient(),
-		KubeClient: kubeClient,
-		Scheme:     mgr.GetScheme(),
-		// TODO: derive pod namespace from the pod that this process is running in.
-		PodNamespace: "kuberpak-system",
+		Namespace:  ns,
+		NamePrefix: "bundle-",
+	}
+
+	if err = (&controllers.BundleReconciler{
+		Client:       mgr.GetClient(),
+		KubeClient:   kubeClient,
+		Scheme:       mgr.GetScheme(),
+		PodNamespace: ns,
+		Storage:      bundleStorage,
 		UnpackImage:  "quay.io/joelanford/kuberpak-unpack:v0.1.0",
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bundle")
 		os.Exit(1)
 	}
 	if err = (&controllers.BundleInstanceReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		PodNamespace: "kuberpak-system",
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		BundleStorage: bundleStorage,
+		ReleaseStorage: &storage.ConfigMaps{
+			Client:     mgr.GetClient(),
+			Namespace:  ns,
+			NamePrefix: "bundle-instance-",
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "BundleInstance")
 		os.Exit(1)

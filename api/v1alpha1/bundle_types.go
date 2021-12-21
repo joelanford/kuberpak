@@ -17,7 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -72,11 +71,11 @@ type BundleInfo struct {
 }
 
 type BundleObject struct {
-	APIVersion   string                      `json:"apiVersion"`
-	Kind         string                      `json:"kind"`
-	Name         string                      `json:"name"`
-	Namespace    string                      `json:"namespace"`
-	ConfigMapRef corev1.LocalObjectReference `json:"configMapRef"`
+	Group     string `json:"group"`
+	Version   string `json:"version"`
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
 }
 
 //+kubebuilder:object:root=true

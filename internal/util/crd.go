@@ -58,30 +58,72 @@ func CreateOrUpdateCRD(ctx context.Context, cl client.Client, crd *apiextensions
 	return controllerutil.OperationResultUpdated, nil
 }
 
+func keys(m map[string]apiextensionsv1.CustomResourceDefinitionVersion) sets.String {
+	return sets.StringKeySet(m)
+}
+
 func validateCRDCompatibility(ctx context.Context, cl client.Client, oldCRD *apiextensionsv1.CustomResourceDefinition, newCRD *apiextensionsv1.CustomResourceDefinition) error {
-	// If validation schema is unchanged, return right away
-	newestSchema := newCRD.Spec.Versions[len(newCRD.Spec.Versions)-1].Schema
-	for i, oldVersion := range oldCRD.Spec.Versions {
-		if !reflect.DeepEqual(oldVersion.Schema, newestSchema) {
-			break
-		}
-		if i == len(oldCRD.Spec.Versions)-1 {
-			// we are on the last iteration
-			// schema has not changed between versions at this point.
-			return nil
-		}
+	// Cases to test:
+	//   New CRD removes version that Old CRD had => Must ensure nothing is stored at removed version
+	//   New CRD changes a version that Old CRD has => Must validate existing CRs with new schema
+	//   New CRD adds a version that Old CRD does not have =>
+	//      - If conversion strategy is None, ensure existing CRs validate with new schema.
+	//      - If conversion strategy is Webhook, allow update (assume webhook handles conversion correctly)
+
+	oldVersions := map[string]apiextensionsv1.CustomResourceDefinitionVersion{}
+	newVersions := map[string]apiextensionsv1.CustomResourceDefinitionVersion{}
+
+	for _, v := range oldCRD.Spec.Versions {
+		oldVersions[v.Name] = v
+	}
+	for _, v := range newCRD.Spec.Versions {
+		newVersions[v.Name] = v
 	}
 
+	existingStoredVersions := sets.NewString(oldCRD.Status.StoredVersions...)
+	removedVersions := keys(oldVersions).Difference(keys(newVersions))
+	invalidRemovedVersions := existingStoredVersions.Intersection(removedVersions)
+	if invalidRemovedVersions.Len() > 0 {
+		return fmt.Errorf("cannot remove stored versions %v", invalidRemovedVersions.List())
+	}
+
+	similarVersions := keys(oldVersions).Intersection(keys(newVersions))
+	diffVersions := sets.NewString()
+	for _, v := range similarVersions.List() {
+		if !reflect.DeepEqual(oldVersions[v].Schema, newVersions[v].Schema) {
+			diffVersions.Insert(v)
+		}
+	}
 	convertedCRD := &apiextensions.CustomResourceDefinition{}
 	if err := apiextensionsv1.Convert_v1_CustomResourceDefinition_To_apiextensions_CustomResourceDefinition(newCRD, convertedCRD, nil); err != nil {
 		return err
 	}
-	for _, version := range oldCRD.Spec.Versions {
-		if version.Served {
-			listGVK := schema.GroupVersionKind{Group: oldCRD.Spec.Group, Version: version.Name, Kind: oldCRD.Spec.Names.ListKind}
-			err := validateExistingCRs(ctx, cl, listGVK, convertedCRD)
+	for _, v := range diffVersions.List() {
+		oldV := oldVersions[v]
+		if oldV.Served {
+			listGVK := schema.GroupVersionKind{Group: oldCRD.Spec.Group, Version: v, Kind: oldCRD.Spec.Names.ListKind}
+			err := validateExistingCRs(ctx, cl, listGVK, newVersions[v])
 			if err != nil {
 				return err
+			}
+		}
+	}
+
+	// If the new CRD has no conversion configured or a "None" conversion strategy, we need to check to be sure that the
+	// new schema validates all of the existing CRs of the existing versions.
+	addedVersions := keys(newVersions).Difference(keys(oldVersions))
+	if addedVersions.Len() > 0 && (newCRD.Spec.Conversion == nil || newCRD.Spec.Conversion.Strategy == apiextensionsv1.NoneConverter) {
+		for _, va := range addedVersions.List() {
+			newV := newVersions[va]
+			for _, vs := range similarVersions.List() {
+				oldV := oldVersions[vs]
+				if oldV.Served {
+					listGVK := schema.GroupVersionKind{Group: oldCRD.Spec.Group, Version: oldV.Name, Kind: oldCRD.Spec.Names.ListKind}
+					err := validateExistingCRs(ctx, cl, listGVK, newV)
+					if err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -89,20 +131,25 @@ func validateCRDCompatibility(ctx context.Context, cl client.Client, oldCRD *api
 	return nil
 }
 
-func validateExistingCRs(ctx context.Context, dynamicClient client.Client, listGVK schema.GroupVersionKind, newCRD *apiextensions.CustomResourceDefinition) error {
+func validateExistingCRs(ctx context.Context, dynamicClient client.Client, listGVK schema.GroupVersionKind, newVersion apiextensionsv1.CustomResourceDefinitionVersion) error {
+	convertedVersion := &apiextensions.CustomResourceDefinitionVersion{}
+	if err := apiextensionsv1.Convert_v1_CustomResourceDefinitionVersion_To_apiextensions_CustomResourceDefinitionVersion(&newVersion, convertedVersion, nil); err != nil {
+		return err
+	}
+
 	crList := &unstructured.UnstructuredList{}
 	crList.SetGroupVersionKind(listGVK)
 	if err := dynamicClient.List(ctx, crList); err != nil {
-		return fmt.Errorf("error listing objects for GroupVersionKind %#v: %s", listGVK, err)
+		return fmt.Errorf("error listing objects for %s: %v", listGVK, err)
 	}
 	for _, cr := range crList.Items {
-		validator, _, err := validation.NewSchemaValidator(newCRD.Spec.Validation)
+		validator, _, err := validation.NewSchemaValidator(convertedVersion.Schema)
 		if err != nil {
-			return fmt.Errorf("error creating validator for schema %#v: %s", newCRD.Spec.Validation, err)
+			return fmt.Errorf("error creating validator for the schema of version %q: %v", newVersion.Name, err)
 		}
 		err = validation.ValidateCustomResource(field.NewPath(""), cr.UnstructuredContent(), validator).ToAggregate()
 		if err != nil {
-			return fmt.Errorf("error validating custom resource against new schema for %s %s/%s: %v", newCRD.Spec.Names.Kind, cr.GetNamespace(), cr.GetName(), err)
+			return fmt.Errorf("existing custom object %s/%s failed validation for new schema version %s: %v", cr.GetNamespace(), cr.GetName(), newVersion.Name, err)
 		}
 	}
 	return nil

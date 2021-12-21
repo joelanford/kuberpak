@@ -17,25 +17,19 @@ limitations under the License.
 package controllers
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"sort"
 
 	"github.com/go-logr/logr"
 	helmclient "github.com/operator-framework/helm-operator-plugins/pkg/client"
-	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,18 +38,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-	"sigs.k8s.io/yaml"
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
-	"github.com/joelanford/kuberpak/internal/util"
+	"github.com/joelanford/kuberpak/internal/storage"
 )
 
 // BundleInstanceReconciler reconciles a BundleInstance object
 type BundleInstanceReconciler struct {
 	client.Client
+	BundleStorage  storage.Storage
+	ReleaseStorage storage.Storage
+
 	ActionConfigGetter helmclient.ActionConfigGetter
 	ActionClientGetter helmclient.ActionClientGetter
-	PodNamespace       string
 	Scheme             *runtime.Scheme
 }
 
@@ -103,8 +98,9 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		})
 		return ctrl.Result{}, err
 	}
+
 	installNamespace := bi.Annotations["kuberpak.io/install-namespace"]
-	desiredCRDs, desiredObjects, err := r.getDesiredObjects(ctx, bi, installNamespace)
+	desiredObjects, err := r.getDesiredObjects(ctx, bi, installNamespace)
 	if err != nil {
 		var bnuErr *errBundleNotUnpacked
 		if errors.As(err, &bnuErr) {
@@ -128,27 +124,117 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{}, err
 		}
 	}
-	_ = desiredObjects
 
-	createOrUpdateAll := func(ctx context.Context, cl client.Client, crds []apiextensionsv1.CustomResourceDefinition) error {
-		for _, crd := range crds {
-			if _, err := util.CreateOrUpdateCRD(ctx, cl, &crd); err != nil {
-				return err
-			}
-		}
-		return nil
+	actualObjects, err := r.getActualObjects(ctx, bi)
+	if err != nil {
+		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+			Type:    "Installed",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ClusterStateLookupFailed",
+			Message: err.Error(),
+		})
+		return ctrl.Result{}, err
 	}
 
-	for _, cl := range []client.Client{client.NewDryRunClient(r.Client), r.Client} {
-		if err := createOrUpdateAll(ctx, cl, desiredCRDs); err != nil {
+	// Delete any actual objects that are no longer desired
+	type objKey struct {
+		schema.GroupVersionKind
+		types.NamespacedName
+	}
+	desiredMap := map[objKey]client.Object{}
+	for _, obj := range desiredObjects {
+		obj := obj
+		k := objKey{
+			GroupVersionKind: obj.GetObjectKind().GroupVersionKind(),
+			NamespacedName:   types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()},
+		}
+		desiredMap[k] = obj
+	}
+	for _, obj := range actualObjects {
+		k := objKey{
+			GroupVersionKind: obj.GetObjectKind().GroupVersionKind(),
+			NamespacedName:   types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()},
+		}
+		if _, ok := desiredMap[k]; !ok {
+			l.Info("deleting object", "dName", obj.GetName(), "dNamespace", obj.GetNamespace(), "dGVK", obj.GetObjectKind().GroupVersionKind().String())
+			if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
+				meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+					Type:    "Installed",
+					Status:  metav1.ConditionFalse,
+					Reason:  "CleanupFailed",
+					Message: err.Error(),
+				})
+				return ctrl.Result{}, err
+			}
+		}
+	}
+	for _, obj := range desiredObjects {
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			obj.SetNamespace(installNamespace)
+			if err := r.Client.Create(ctx, obj); err == nil {
+				return nil
+			} else if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create object %s, %s/%s: %v", obj.GetObjectKind().GroupVersionKind(), obj.GetNamespace(), obj.GetName(), err)
+			}
+			return r.Client.Patch(ctx, obj, client.Apply, client.FieldOwner("kuberpak.io/registry+v1"), client.ForceOwnership)
+		}); err != nil {
 			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
 				Type:    "Installed",
 				Status:  metav1.ConditionFalse,
-				Reason:  "CRDInstallFailed",
+				Reason:  "InstallFailed",
 				Message: err.Error(),
 			})
 			return ctrl.Result{}, err
 		}
+	}
+
+	//desiredCRDs := []apiextensionsv1.CustomResourceDefinition{}
+	//for _, obj := range desiredObjects {
+	//	u := obj.(*unstructured.Unstructured)
+	//	if obj.GetObjectKind().GroupVersionKind().Kind == "CustomResourceDefinition" {
+	//		crd := &apiextensionsv1.CustomResourceDefinition{}
+	//		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, crd); err != nil {
+	//			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+	//				Type:    "Installed",
+	//				Status:  metav1.ConditionFalse,
+	//				Reason:  "BundleLookupFailed",
+	//				Message: err.Error(),
+	//			})
+	//			return ctrl.Result{}, err
+	//		}
+	//		desiredCRDs = append(desiredCRDs, *crd)
+	//	}
+	//}
+	//
+	//createOrUpdateAll := func(ctx context.Context, cl client.Client, crds []apiextensionsv1.CustomResourceDefinition) error {
+	//	for _, crd := range crds {
+	//		if _, err := util.CreateOrUpdateCRD(ctx, cl, &crd); err != nil {
+	//			return err
+	//		}
+	//	}
+	//	return nil
+	//}
+	//
+	//for _, cl := range []client.Client{client.NewDryRunClient(r.Client), r.Client} {
+	//	if err := createOrUpdateAll(ctx, cl, desiredCRDs); err != nil {
+	//		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+	//			Type:    "Installed",
+	//			Status:  metav1.ConditionFalse,
+	//			Reason:  "CRDInstallFailed",
+	//			Message: err.Error(),
+	//		})
+	//		return ctrl.Result{}, err
+	//	}
+	//}
+
+	if err := r.ReleaseStorage.Store(ctx, bi, desiredObjects); err != nil {
+		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+			Type:    "Installed",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ReleaseStorageError",
+			Message: err.Error(),
+		})
+		return ctrl.Result{}, err
 	}
 
 	//currentManifest, err := r.getCurrentManifest(ctx, bi)
@@ -241,103 +327,73 @@ func (err errBundleNotUnpacked) Error() string {
 	return fmt.Sprintf("%s, current phase=%s", baseError, err.currentPhase)
 }
 
-func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance, installNamespace string) ([]apiextensionsv1.CustomResourceDefinition, []unstructured.Unstructured, error) {
+func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance, installNamespace string) ([]client.Object, error) {
 	b := &olmv1alpha1.Bundle{}
 	if err := r.Get(ctx, types.NamespacedName{Name: bi.Spec.BundleName}, b); err != nil {
-		return nil, nil, fmt.Errorf("get bundle %q: %v", bi.Spec.BundleName, err)
+		return nil, fmt.Errorf("get bundle %q: %v", bi.Spec.BundleName, err)
 	}
 	if b.Status.Phase != olmv1alpha1.PhaseUnpacked {
-		return nil, nil, &errBundleNotUnpacked{currentPhase: b.Status.Phase}
+		return nil, &errBundleNotUnpacked{currentPhase: b.Status.Phase}
 	}
 
-	objectConfigMaps := &corev1.ConfigMapList{}
-	listOpts := []client.ListOption{client.InNamespace("kuberpak-system"), client.MatchingLabels{
-		"kuberpak.io/bundle-name":    b.Name,
-		"kuberpak.io/configmap-type": "object",
-	}}
-	if err := r.List(ctx, objectConfigMaps, listOpts...); err != nil {
-		return nil, nil, fmt.Errorf("list bundle object config maps: %v", err)
+	objects, err := r.BundleStorage.Load(ctx, b)
+	if err != nil {
+		return nil, fmt.Errorf("load bundle objects: %v", err)
 	}
 
-	sort.Slice(objectConfigMaps.Items, func(i, j int) bool {
-		if objectConfigMaps.Items[i].APIVersion != objectConfigMaps.Items[j].APIVersion {
-			return objectConfigMaps.Items[i].APIVersion < objectConfigMaps.Items[j].APIVersion
-		}
-		if objectConfigMaps.Items[i].Kind != objectConfigMaps.Items[j].Kind {
-			return objectConfigMaps.Items[i].Kind < objectConfigMaps.Items[j].Kind
-		}
-		if objectConfigMaps.Items[i].Namespace != objectConfigMaps.Items[j].Namespace {
-			return objectConfigMaps.Items[i].Namespace < objectConfigMaps.Items[j].Namespace
-		}
-		return objectConfigMaps.Items[i].Name < objectConfigMaps.Items[j].Name
-	})
-
-	desiredCRDs := []apiextensionsv1.CustomResourceDefinition{}
-	desiredObjects := []unstructured.Unstructured{}
-	for _, cm := range objectConfigMaps.Items {
-		r, err := gzip.NewReader(bytes.NewReader(cm.BinaryData["object"]))
-		if err != nil {
-			return nil, nil, fmt.Errorf("create gzip reader for bundle object data: %v", err)
-		}
-		objData, err := ioutil.ReadAll(r)
-		if err != nil {
-			return nil, nil, fmt.Errorf("read gzip data for bundle object: %v", err)
-		}
-		obj := &unstructured.Unstructured{}
-		if err := yaml.Unmarshal(objData, obj); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal bundle object: %v", err)
-		}
-		labels := obj.GetLabels()
-		if labels == nil {
-			labels = map[string]string{}
-		}
-		labels["kuberpak.io/bundle-instance-name"] = bi.Name
-		obj.SetLabels(labels)
+	ownerRef := metav1.NewControllerRef(bi, bi.GroupVersionKind())
+	desiredObjects := []client.Object{}
+	for _, obj := range objects {
+		obj := obj
+		obj.SetLabels(map[string]string{
+			"kuberpak.io/bundle-instance-name": bi.Name,
+		})
 		if obj.GetObjectKind().GroupVersionKind().Kind == "ClusterServiceVersion" {
 			obj.SetNamespace(installNamespace)
 		}
-
-		if obj.GetObjectKind().GroupVersionKind().Kind == "CustomResourceDefinition" {
-			crd := &apiextensionsv1.CustomResourceDefinition{}
-			if err := yaml.Unmarshal(objData, crd); err != nil {
-				return nil, nil, fmt.Errorf("unmarshal CRD: %v", err)
-			}
-			desiredCRDs = append(desiredCRDs, *crd)
-		} else {
-			desiredObjects = append(desiredObjects, *obj)
-		}
+		obj.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
+		desiredObjects = append(desiredObjects, &obj)
 	}
-	return desiredCRDs, desiredObjects, nil
+	return desiredObjects, nil
 }
 
-func (r *BundleInstanceReconciler) getReleaseObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance) (string, error) {
-	currentManifestConfigMap := &corev1.ConfigMap{}
-	currentManifestConfigMapKey := types.NamespacedName{Namespace: r.PodNamespace, Name: fmt.Sprintf("bundle-instance-manifest-%s", bi.Name)}
-	err := r.Get(ctx, currentManifestConfigMapKey, currentManifestConfigMap)
+func (r *BundleInstanceReconciler) getActualObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance) ([]client.Object, error) {
+	us, err := r.ReleaseStorage.Load(ctx, bi)
 	if apierrors.IsNotFound(err) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	rd, err := gzip.NewReader(bytes.NewReader(currentManifestConfigMap.BinaryData["manifest"]))
-	if err != nil {
-		return "", err
+	objects := []client.Object{}
+	for _, u := range us {
+		u := u
+		objects = append(objects, &u)
 	}
-	currentManifestData, err := io.ReadAll(rd)
-	if err != nil {
-		return "", err
-	}
-	return string(currentManifestData), nil
+	return objects, nil
 }
 
-func bundleInstanceProvisionerFilter(provisionerClassName string) predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		b := obj.(*olmv1alpha1.BundleInstance)
-		return b.Spec.ProvisionerClassName == provisionerClassName
-	})
-}
+//func (r *BundleInstanceReconciler) getReleaseObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance) (string, error) {
+//	currentManifestConfigMap := &corev1.ConfigMap{}
+//	currentManifestConfigMapKey := types.NamespacedName{Namespace: r.PodNamespace, Name: fmt.Sprintf("bundle-instance-manifest-%s", bi.Name)}
+//	err := r.Get(ctx, currentManifestConfigMapKey, currentManifestConfigMap)
+//	if apierrors.IsNotFound(err) {
+//		return "", nil
+//	}
+//	if err != nil {
+//		return "", err
+//	}
+//
+//	rd, err := gzip.NewReader(bytes.NewReader(currentManifestConfigMap.BinaryData["manifest"]))
+//	if err != nil {
+//		return "", err
+//	}
+//	currentManifestData, err := io.ReadAll(rd)
+//	if err != nil {
+//		return "", err
+//	}
+//	return string(currentManifestData), nil
+//}
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -347,6 +403,13 @@ func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&olmv1alpha1.BundleInstance{}, builder.WithPredicates(bundleInstanceProvisionerFilter("kuberpak.io/registry+v1"))).
 		Watches(&source.Kind{Type: &olmv1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(mapBundleToBundleInstanceHandler(mgr.GetClient(), mgr.GetLogger()))).
 		Complete(r)
+}
+
+func bundleInstanceProvisionerFilter(provisionerClassName string) predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		b := obj.(*olmv1alpha1.BundleInstance)
+		return b.Spec.ProvisionerClassName == provisionerClassName
+	})
 }
 
 func mapBundleToBundleInstanceHandler(cl client.Client, log logr.Logger) handler.MapFunc {

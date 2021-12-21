@@ -84,22 +84,32 @@ func mutate(f controllerutil.MutateFn, key client.ObjectKey, obj client.Object) 
 	return nil
 }
 
+func MergeMaps(maps ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func ConfigMapsEqual(a, b corev1.ConfigMap) bool {
-	if !stringMapsEqual(a.Labels, b.Labels) {
-		fmt.Println("labels differ", a.Labels, b.Labels)
-	}
-	if !stringMapsEqual(a.Annotations, b.Annotations) {
-		fmt.Println("annotations differ", a.Annotations, b.Annotations)
-	}
-	if !ownerRefsEqual(a.OwnerReferences, b.OwnerReferences) {
-		fmt.Println("ownerrefs differ", a.OwnerReferences, b.OwnerReferences)
-	}
-	if !stringMapsEqual(a.Data, b.Data) {
-		fmt.Println("data differs", a.Data, b.Data)
-	}
-	if !bytesMapsEqual(a.BinaryData, b.BinaryData) {
-		fmt.Println("binary data differs", a.BinaryData, b.BinaryData)
-	}
+	//if !stringMapsEqual(a.Labels, b.Labels) {
+	//	fmt.Println("labels differ", a.Labels, b.Labels)
+	//}
+	//if !stringMapsEqual(a.Annotations, b.Annotations) {
+	//	fmt.Println("annotations differ", a.Annotations, b.Annotations)
+	//}
+	//if !ownerRefsEqual(a.OwnerReferences, b.OwnerReferences) {
+	//	fmt.Println("ownerrefs differ", a.OwnerReferences, b.OwnerReferences)
+	//}
+	//if !stringMapsEqual(a.Data, b.Data) {
+	//	fmt.Println("data differs", a.Data, b.Data)
+	//}
+	//if !bytesMapsEqual(a.BinaryData, b.BinaryData) {
+	//	fmt.Println("binary data differs", a.BinaryData, b.BinaryData)
+	//}
 
 	return stringMapsEqual(a.Labels, b.Labels) &&
 		stringMapsEqual(a.Annotations, b.Annotations) &&
