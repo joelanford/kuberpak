@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/go-logr/logr"
 	v1 "github.com/operator-framework/api/pkg/operators/v1"
@@ -34,11 +35,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -48,23 +52,30 @@ import (
 
 	olmv1alpha1 "github.com/joelanford/kuberpak/api/v1alpha1"
 	"github.com/joelanford/kuberpak/internal/convert"
+	helmpredicate "github.com/joelanford/kuberpak/internal/helm-operator-plugins/predicate"
 	"github.com/joelanford/kuberpak/internal/storage"
 )
 
 // BundleInstanceReconciler reconciles a BundleInstance object
 type BundleInstanceReconciler struct {
 	client.Client
-	BundleStorage    storage.Storage
-	ReleaseNamespace string
+	Scheme     *runtime.Scheme
+	Controller controller.Controller
 
 	ActionClientGetter helmclient.ActionClientGetter
-	Scheme             *runtime.Scheme
+	BundleStorage      storage.Storage
+	ReleaseNamespace   string
+
+	dynamicWatchMutex sync.RWMutex
+	dynamicWatchGVKs  map[schema.GroupVersionKind]struct{}
 }
 
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundleinstances,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundleinstances/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundleinstances/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
+//+kubebuilder:rbac:groups=operators.coreos.com,resources=operatorgroups,verbs=get;list;watch
+//+kubebuilder:rbac:groups=*,resources=*,verbs=*
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -237,107 +248,44 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, fmt.Errorf("unexpected release state %q", state)
 	}
 
-	//actualObjects, err := r.getActualObjects(ctx, bi)
-	//if err != nil {
-	//	meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
-	//		Type:    "Installed",
-	//		Status:  metav1.ConditionFalse,
-	//		Reason:  "ClusterStateLookupFailed",
-	//		Message: err.Error(),
-	//	})
-	//	return ctrl.Result{}, err
-	//}
-	//
-	//// Delete any actual objects that are no longer desired
-	//type objKey struct {
-	//	schema.GroupVersionKind
-	//	types.NamespacedName
-	//}
-	//desiredMap := map[objKey]client.Object{}
-	//for _, obj := range desiredObjects {
-	//	obj := obj
-	//	k := objKey{
-	//		GroupVersionKind: obj.GetObjectKind().GroupVersionKind(),
-	//		NamespacedName:   types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()},
-	//	}
-	//	desiredMap[k] = obj
-	//}
-	//for _, obj := range actualObjects {
-	//	k := objKey{
-	//		GroupVersionKind: obj.GetObjectKind().GroupVersionKind(),
-	//		NamespacedName:   types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()},
-	//	}
-	//	if _, ok := desiredMap[k]; !ok {
-	//		l.Info("deleting object", "dName", obj.GetName(), "dNamespace", obj.GetNamespace(), "dGVK", obj.GetObjectKind().GroupVersionKind().String())
-	//		if err := r.Delete(ctx, obj); client.IgnoreNotFound(err) != nil {
-	//			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
-	//				Type:    "Installed",
-	//				Status:  metav1.ConditionFalse,
-	//				Reason:  "CleanupFailed",
-	//				Message: err.Error(),
-	//			})
-	//			return ctrl.Result{}, err
-	//		}
-	//	}
-	//}
-	//for _, obj := range desiredObjects {
-	//	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-	//		obj.SetNamespace(installNamespace)
-	//		if err := r.Client.Create(ctx, obj); err == nil {
-	//			return nil
-	//		} else if !apierrors.IsAlreadyExists(err) {
-	//			return fmt.Errorf("create object %s, %s/%s: %v", obj.GetObjectKind().GroupVersionKind(), obj.GetNamespace(), obj.GetName(), err)
-	//		}
-	//		return r.Client.Patch(ctx, obj, client.Apply, client.FieldOwner("kuberpak.io/registry+v1"), client.ForceOwnership)
-	//	}); err != nil {
-	//		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
-	//			Type:    "Installed",
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  "InstallFailed",
-	//			Message: err.Error(),
-	//		})
-	//		return ctrl.Result{}, err
-	//	}
-	//}
+	for _, obj := range desiredObjects {
+		uMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+		if err != nil {
+			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+				Type:    "Installed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "CreateDynamicWatchFailed",
+				Message: err.Error(),
+			})
+			return ctrl.Result{}, err
+		}
 
-	//desiredCRDs := []apiextensionsv1.CustomResourceDefinition{}
-	//for _, obj := range desiredObjects {
-	//	u := obj.(*unstructured.Unstructured)
-	//	if obj.GetObjectKind().GroupVersionKind().Kind == "CustomResourceDefinition" {
-	//		crd := &apiextensionsv1.CustomResourceDefinition{}
-	//		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, crd); err != nil {
-	//			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
-	//				Type:    "Installed",
-	//				Status:  metav1.ConditionFalse,
-	//				Reason:  "BundleLookupFailed",
-	//				Message: err.Error(),
-	//			})
-	//			return ctrl.Result{}, err
-	//		}
-	//		desiredCRDs = append(desiredCRDs, *crd)
-	//	}
-	//}
-	//
-	//createOrUpdateAll := func(ctx context.Context, cl client.Client, crds []apiextensionsv1.CustomResourceDefinition) error {
-	//	for _, crd := range crds {
-	//		if _, err := util.CreateOrUpdateCRD(ctx, cl, &crd); err != nil {
-	//			return err
-	//		}
-	//	}
-	//	return nil
-	//}
-	//
-	//for _, cl := range []client.Client{client.NewDryRunClient(r.Client), r.Client} {
-	//	if err := createOrUpdateAll(ctx, cl, desiredCRDs); err != nil {
-	//		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
-	//			Type:    "Installed",
-	//			Status:  metav1.ConditionFalse,
-	//			Reason:  "CRDInstallFailed",
-	//			Message: err.Error(),
-	//		})
-	//		return ctrl.Result{}, err
-	//	}
-	//}
+		u := &unstructured.Unstructured{Object: uMap}
+		if err := func() error {
+			r.dynamicWatchMutex.Lock()
+			defer r.dynamicWatchMutex.Unlock()
+
+			_, isWatched := r.dynamicWatchGVKs[u.GroupVersionKind()]
+			if !isWatched {
+				if err := r.Controller.Watch(
+					&source.Kind{Type: u},
+					&handler.EnqueueRequestForOwner{OwnerType: bi, IsController: true},
+					helmpredicate.DependentPredicateFuncs()); err != nil {
+					return err
+				}
+				r.dynamicWatchGVKs[u.GroupVersionKind()] = struct{}{}
+			}
+			return nil
+		}(); err != nil {
+			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+				Type:    "Installed",
+				Status:  metav1.ConditionFalse,
+				Reason:  "CreateDynamicWatchFailed",
+				Message: err.Error(),
+			})
+			return ctrl.Result{}, err
+		}
+	}
 	meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
 		Type:   "Installed",
 		Status: metav1.ConditionTrue,
@@ -423,7 +371,7 @@ func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *ol
 	for _, obj := range objects {
 		obj := obj
 		obj.SetLabels(map[string]string{
-			"kuberpak.io/bundle-instance-name": bi.Name,
+			"kuberpak.io/owner-name": bi.Name,
 		})
 		switch obj.GetObjectKind().GroupVersionKind().Kind {
 		case "ClusterServiceVersion":
@@ -492,10 +440,16 @@ func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *ol
 func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	//r.ActionConfigGetter = helmclient.NewActionConfigGetter(mgr.GetConfig(), mgr.GetRESTMapper(), mgr.GetLogger())
 	//r.ActionClientGetter = helmclient.NewActionClientGetter(r.ActionConfigGetter)
-	return ctrl.NewControllerManagedBy(mgr).
+	controller, err := ctrl.NewControllerManagedBy(mgr).
 		For(&olmv1alpha1.BundleInstance{}, builder.WithPredicates(bundleInstanceProvisionerFilter("kuberpak.io/registry+v1"))).
 		Watches(&source.Kind{Type: &olmv1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(mapBundleToBundleInstanceHandler(mgr.GetClient(), mgr.GetLogger()))).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	r.Controller = controller
+	r.dynamicWatchGVKs = map[schema.GroupVersionKind]struct{}{}
+	return nil
 }
 
 func bundleInstanceProvisionerFilter(provisionerClassName string) predicate.Predicate {

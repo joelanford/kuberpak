@@ -25,11 +25,14 @@ import (
 	"github.com/operator-framework/api/pkg/operators/v1alpha1"
 	helmclient "github.com/operator-framework/helm-operator-plugins/pkg/client"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -80,6 +83,12 @@ func main() {
 		setupLog.Error(err, "unable to create kubernetes client")
 		os.Exit(1)
 	}
+	dependentRequirement, err := labels.NewRequirement("kuberpak.io/owner-name", selection.Exists, nil)
+	if err != nil {
+		setupLog.Error(err, "unable to create dependent label selector for cache")
+		os.Exit(1)
+	}
+	dependentSelector := labels.NewSelector().Add(*dependentRequirement)
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		MetricsBindAddress:     metricsAddr,
@@ -87,6 +96,17 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "510f803c.olm.operatorframework.io",
+		NewCache: cache.BuilderWithOptions(cache.Options{
+			SelectorsByObject: cache.SelectorsByObject{
+				&olmv1alpha1.BundleInstance{}: {},
+				&olmv1alpha1.Bundle{}:         {},
+				&v1.OperatorGroup{}:           {},
+				//&corev1.Namespace{}:           {},
+			},
+			DefaultSelector: cache.ObjectSelector{
+				Label: dependentSelector,
+			},
+		}),
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

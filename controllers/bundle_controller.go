@@ -218,7 +218,7 @@ func (r *BundleReconciler) ensureUnpackPod(ctx context.Context, bundle *olmv1alp
 	pod.SetName(util.PodName(bundle.Name))
 	pod.SetNamespace(r.PodNamespace)
 	return util.CreateOrRecreate(ctx, r.Client, pod, func() error {
-		pod.SetLabels(util.BundleLabels(bundle.Name))
+		pod.SetLabels(map[string]string{"kuberpak.io/owner-name": bundle.Name})
 		pod.SetOwnerReferences([]metav1.OwnerReference{*controllerRef})
 		pod.Spec.AutomountServiceAccountToken = &automountServiceAccountToken
 		pod.Spec.ImagePullSecrets = imagePullSecretRefs
