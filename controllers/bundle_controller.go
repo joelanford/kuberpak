@@ -85,8 +85,8 @@ type BundleReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.9.2/pkg/reconcile
 func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reconcileErr error) {
 	l := log.FromContext(ctx)
-	l.Info("starting reconciliation")
-	defer l.Info("ending reconciliation")
+	l.V(1).Info("starting reconciliation")
+	defer l.V(1).Info("ending reconciliation")
 	bundle := &olmv1alpha1.Bundle{}
 	if err := r.Get(ctx, req.NamespacedName, bundle); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -98,132 +98,86 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 			l.Error(err, "failed to update status")
 		}
 	}()
-	u.UpdateStatus(
-		updater.EnsureObservedGeneration(bundle.Generation),
-	)
+	u.UpdateStatus(updater.EnsureObservedGeneration(bundle.Generation))
 
 	pod := &corev1.Pod{}
 	if op, err := r.ensureUnpackPod(ctx, bundle, pod); err != nil {
-		u.UpdateStatus(
-			updater.SetBundleInfo(nil),
-			updater.EnsureBundleDigest(""),
-			updater.SetPhase(olmv1alpha1.PhaseFailing),
-			updater.EnsureCondition(metav1.Condition{
-				Type:    olmv1alpha1.TypeUnpacked,
-				Status:  metav1.ConditionFalse,
-				Reason:  olmv1alpha1.ReasonUnpackFailed,
-				Message: err.Error(),
-			}),
-		)
-		return ctrl.Result{}, fmt.Errorf("ensure unpack pod: %v", err)
+		u.UpdateStatus(updater.SetBundleInfo(nil), updater.EnsureBundleDigest(""))
+		return ctrl.Result{}, updateStatusUnpackFailing(&u, fmt.Errorf("ensure unpack pod: %v", err))
 	} else if op == controllerutil.OperationResultCreated || op == controllerutil.OperationResultUpdated || pod.DeletionTimestamp != nil {
-		u.UpdateStatus(
-			updater.SetBundleInfo(nil),
-			updater.EnsureBundleDigest(""),
-			updater.SetPhase(olmv1alpha1.PhasePending),
-			updater.EnsureCondition(metav1.Condition{
-				Type:   olmv1alpha1.TypeUnpacked,
-				Status: metav1.ConditionFalse,
-				Reason: olmv1alpha1.ReasonUnpackPending,
-			}),
-		)
+		updateStatusUnpackPending(&u)
 		return ctrl.Result{}, nil
 	}
 
 	switch phase := pod.Status.Phase; phase {
 	case corev1.PodPending:
-		var messages []string
-		for _, cStatus := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
-			if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ErrImagePull" {
-				messages = append(messages, cStatus.State.Waiting.Message)
-			}
-			if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ImagePullBackoff" {
-				messages = append(messages, cStatus.State.Waiting.Message)
-			}
-		}
-		u.UpdateStatus(
-			updater.SetBundleInfo(nil),
-			updater.EnsureBundleDigest(""),
-			updater.SetPhase(olmv1alpha1.PhasePending),
-			updater.EnsureCondition(metav1.Condition{
-				Type:    olmv1alpha1.TypeUnpacked,
-				Status:  metav1.ConditionFalse,
-				Reason:  olmv1alpha1.ReasonUnpackPending,
-				Message: strings.Join(messages, "; "),
-			}),
-		)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.handlePendingPod(&u, pod)
 	case corev1.PodRunning:
-		u.UpdateStatus(
-			updater.SetBundleInfo(nil),
-			updater.EnsureBundleDigest(""),
-			updater.SetPhase(olmv1alpha1.PhaseUnpacking),
-			updater.EnsureCondition(metav1.Condition{
-				Type:   olmv1alpha1.TypeUnpacked,
-				Status: metav1.ConditionFalse,
-				Reason: olmv1alpha1.ReasonUnpacking,
-			}),
-		)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.handleRunningPod(&u)
 	case corev1.PodFailed:
-		u.UpdateStatus(
-			updater.SetBundleInfo(nil),
-			updater.EnsureBundleDigest(""),
-			updater.SetPhase(olmv1alpha1.PhaseFailing),
-		)
-		logs, err := r.getPodLogs(ctx, bundle)
-		if err != nil {
-			err = fmt.Errorf("unpack failed: failed to retrieve failed pod logs: %v", err)
-			u.UpdateStatus(
-				updater.EnsureCondition(metav1.Condition{
-					Type:    olmv1alpha1.TypeUnpacked,
-					Status:  metav1.ConditionFalse,
-					Reason:  olmv1alpha1.ReasonUnpackFailed,
-					Message: err.Error(),
-				}),
-			)
-			return ctrl.Result{}, err
-		}
-		logStr := string(logs)
-		u.UpdateStatus(
-			updater.EnsureCondition(metav1.Condition{
-				Type:    olmv1alpha1.TypeUnpacked,
-				Status:  metav1.ConditionFalse,
-				Reason:  olmv1alpha1.ReasonUnpackFailed,
-				Message: logStr,
-			}),
-		)
-		_ = r.Delete(ctx, pod)
-		return ctrl.Result{}, fmt.Errorf("unpack failed: %v", logStr)
+		return ctrl.Result{}, r.handleFailedPod(ctx, &u, bundle, pod)
 	case corev1.PodSucceeded:
-		status, err := r.handleCompletedPod(ctx, bundle)
-		if err != nil {
-			u.UpdateStatus(
-				updater.SetPhase(olmv1alpha1.PhaseFailing),
-				updater.EnsureCondition(metav1.Condition{
-					Type:    olmv1alpha1.TypeUnpacked,
-					Status:  metav1.ConditionFalse,
-					Reason:  olmv1alpha1.ReasonUnpackFailed,
-					Message: err.Error(),
-				}),
-			)
-			return ctrl.Result{}, err
-		}
-		u.UpdateStatus(
-			updater.SetBundleInfo(status.Info),
-			updater.EnsureBundleDigest(status.Digest),
-			updater.SetPhase(olmv1alpha1.PhaseUnpacked),
-			updater.EnsureCondition(metav1.Condition{
-				Type:   olmv1alpha1.TypeUnpacked,
-				Status: metav1.ConditionTrue,
-				Reason: olmv1alpha1.ReasonUnpackSuccessful,
-			}),
-		)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.handleCompletedPod(ctx, &u, bundle, pod)
 	default:
-		err := fmt.Errorf("unexpected pod phase: %v", phase)
+		return ctrl.Result{}, r.handleUnexpectedPod(ctx, &u, pod)
+	}
+}
+
+func (r *BundleReconciler) handleUnexpectedPod(ctx context.Context, u *updater.Updater, pod *corev1.Pod) error {
+	err := fmt.Errorf("unexpected pod phase: %v", pod.Status.Phase)
+	_ = r.Delete(ctx, pod)
+	return updateStatusUnpackFailing(u, err)
+}
+
+func (r *BundleReconciler) handlePendingPod(u *updater.Updater, pod *corev1.Pod) error {
+	var messages []string
+	for _, cStatus := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+		if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ErrImagePull" {
+			messages = append(messages, cStatus.State.Waiting.Message)
+
+		}
+		if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ImagePullBackoff" {
+			messages = append(messages, cStatus.State.Waiting.Message)
+		}
+	}
+	u.UpdateStatus(
+		updater.SetBundleInfo(nil),
+		updater.EnsureBundleDigest(""),
+		updater.SetPhase(olmv1alpha1.PhasePending),
+		updater.EnsureCondition(metav1.Condition{
+			Type:    olmv1alpha1.TypeUnpacked,
+			Status:  metav1.ConditionFalse,
+			Reason:  olmv1alpha1.ReasonUnpackPending,
+			Message: strings.Join(messages, "; "),
+		}),
+	)
+	return nil
+}
+
+func (r *BundleReconciler) handleRunningPod(u *updater.Updater) error {
+	u.UpdateStatus(
+		updater.SetBundleInfo(nil),
+		updater.EnsureBundleDigest(""),
+		updater.SetPhase(olmv1alpha1.PhaseUnpacking),
+		updater.EnsureCondition(metav1.Condition{
+			Type:   olmv1alpha1.TypeUnpacked,
+			Status: metav1.ConditionFalse,
+			Reason: olmv1alpha1.ReasonUnpacking,
+		}),
+	)
+	return nil
+}
+
+func (r *BundleReconciler) handleFailedPod(ctx context.Context, u *updater.Updater, bundle *olmv1alpha1.Bundle, pod *corev1.Pod) error {
+	u.UpdateStatus(
+		updater.SetBundleInfo(nil),
+		updater.EnsureBundleDigest(""),
+		updater.SetPhase(olmv1alpha1.PhaseFailing),
+	)
+	logs, err := r.getPodLogs(ctx, pod)
+	if err != nil {
+		err = fmt.Errorf("unpack failed: failed to retrieve failed pod logs: %v", err)
 		u.UpdateStatus(
-			updater.SetPhase(olmv1alpha1.PhaseFailing),
 			updater.EnsureCondition(metav1.Condition{
 				Type:    olmv1alpha1.TypeUnpacked,
 				Status:  metav1.ConditionFalse,
@@ -231,9 +185,19 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 				Message: err.Error(),
 			}),
 		)
-		_ = r.Delete(ctx, pod)
-		return ctrl.Result{}, err
+		return err
 	}
+	logStr := string(logs)
+	u.UpdateStatus(
+		updater.EnsureCondition(metav1.Condition{
+			Type:    olmv1alpha1.TypeUnpacked,
+			Status:  metav1.ConditionFalse,
+			Reason:  olmv1alpha1.ReasonUnpackFailed,
+			Message: logStr,
+		}),
+	)
+	_ = r.Delete(ctx, pod)
+	return fmt.Errorf("unpack failed: %v", logStr)
 }
 
 func (r *BundleReconciler) ensureUnpackPod(ctx context.Context, bundle *olmv1alpha1.Bundle, pod *corev1.Pod) (controllerutil.OperationResult, error) {
@@ -344,44 +308,66 @@ func (r *BundleReconciler) ensureImagePullSecrets(ctx context.Context, bundle *o
 	return bundlePullSecrets, nil
 }
 
-func (r *BundleReconciler) handleCompletedPod(ctx context.Context, bundle *olmv1alpha1.Bundle) (*olmv1alpha1.BundleStatus, error) {
-	bundleFS, err := r.getBundleContents(ctx, bundle)
+func updateStatusUnpackPending(u *updater.Updater) {
+	u.UpdateStatus(
+		updater.SetBundleInfo(nil),
+		updater.EnsureBundleDigest(""),
+		updater.SetPhase(olmv1alpha1.PhasePending),
+		updater.EnsureCondition(metav1.Condition{
+			Type:   olmv1alpha1.TypeUnpacked,
+			Status: metav1.ConditionFalse,
+			Reason: olmv1alpha1.ReasonUnpackPending,
+		}),
+	)
+}
+
+func updateStatusUnpackFailing(u *updater.Updater, err error) error {
+	u.UpdateStatus(
+		updater.SetPhase(olmv1alpha1.PhaseFailing),
+		updater.EnsureCondition(metav1.Condition{
+			Type:    olmv1alpha1.TypeUnpacked,
+			Status:  metav1.ConditionFalse,
+			Reason:  olmv1alpha1.ReasonUnpackFailed,
+			Message: err.Error(),
+		}),
+	)
+	return err
+}
+
+func (r *BundleReconciler) handleCompletedPod(ctx context.Context, u *updater.Updater, bundle *olmv1alpha1.Bundle, pod *corev1.Pod) error {
+	bundleFS, err := r.getBundleContents(ctx, pod)
 	if err != nil {
-		return nil, fmt.Errorf("get bundle contents: %v", err)
+		return updateStatusUnpackFailing(u, fmt.Errorf("get bundle contents: %v", err))
 	}
 
-	bundleImageDigest, err := r.getBundleImageDigest(ctx, bundle)
+	bundleImageDigest, err := r.getBundleImageDigest(pod)
 	if err != nil {
-		return nil, fmt.Errorf("get bundle image digest: %v", err)
+		return updateStatusUnpackFailing(u, fmt.Errorf("get bundle image digest: %v", err))
 	}
 
 	annotations, err := getAnnotations(bundleFS)
 	if err != nil {
-		return nil, fmt.Errorf("get bundle annotations: %v", err)
+		return updateStatusUnpackFailing(u, fmt.Errorf("get bundle annotations: %v", err))
 	}
 
 	objects, err := getObjects(bundleFS)
 	if err != nil {
-		return nil, fmt.Errorf("get objects from bundle manifests: %v", err)
+		return updateStatusUnpackFailing(u, fmt.Errorf("get objects from bundle manifests: %v", err))
 	}
 
 	if err := r.Storage.Store(ctx, bundle, objects); err != nil {
-		return nil, fmt.Errorf("persist bundle objects: %v", err)
+		return updateStatusUnpackFailing(u, fmt.Errorf("persist bundle objects: %v", err))
 	}
 
-	var (
-		csvName string
-		version string
-	)
-	bundleObjects := []olmv1alpha1.BundleObject{}
+	info := &olmv1alpha1.BundleInfo{Package: annotations.PackageName}
 	for _, obj := range objects {
 		if obj.GetObjectKind().GroupVersionKind().Kind == "ClusterServiceVersion" {
-			csvName = obj.GetName()
+			info.Name = obj.GetName()
 			u := obj.(*unstructured.Unstructured)
-			version, _, _ = unstructured.NestedString(u.Object, "spec", "version")
+			info.Version, _, _ = unstructured.NestedString(u.Object, "spec", "version")
 		}
 		gvk := obj.GetObjectKind().GroupVersionKind()
-		bundleObjects = append(bundleObjects, olmv1alpha1.BundleObject{
+		info.Objects = append(info.Objects, olmv1alpha1.BundleObject{
 			Group:     gvk.Group,
 			Version:   gvk.Version,
 			Kind:      gvk.Kind,
@@ -390,20 +376,22 @@ func (r *BundleReconciler) handleCompletedPod(ctx context.Context, bundle *olmv1
 		})
 	}
 
-	st := &olmv1alpha1.BundleStatus{
-		Digest: bundleImageDigest,
-		Info: &olmv1alpha1.BundleInfo{
-			Package: annotations.PackageName,
-			Name:    csvName,
-			Version: version,
-			Objects: bundleObjects,
-		},
-	}
-	return st, nil
+	u.UpdateStatus(
+		updater.SetBundleInfo(info),
+		updater.EnsureBundleDigest(bundleImageDigest),
+		updater.SetPhase(olmv1alpha1.PhaseUnpacked),
+		updater.EnsureCondition(metav1.Condition{
+			Type:   olmv1alpha1.TypeUnpacked,
+			Status: metav1.ConditionTrue,
+			Reason: olmv1alpha1.ReasonUnpackSuccessful,
+		}),
+	)
+
+	return nil
 }
 
-func (r *BundleReconciler) getBundleContents(ctx context.Context, bundle *olmv1alpha1.Bundle) (fs.FS, error) {
-	bundleContentsData, err := r.getPodLogs(ctx, bundle)
+func (r *BundleReconciler) getBundleContents(ctx context.Context, pod *corev1.Pod) (fs.FS, error) {
+	bundleContentsData, err := r.getPodLogs(ctx, pod)
 	if err != nil {
 		return nil, fmt.Errorf("get bundle contents: %v", err)
 	}
@@ -419,8 +407,8 @@ func (r *BundleReconciler) getBundleContents(ctx context.Context, bundle *olmv1a
 	return bundleFS, nil
 }
 
-func (r *BundleReconciler) getPodLogs(ctx context.Context, bundle *olmv1alpha1.Bundle) ([]byte, error) {
-	logReader, err := r.KubeClient.CoreV1().Pods(r.PodNamespace).GetLogs(util.PodName(bundle.Name), &corev1.PodLogOptions{}).Stream(ctx)
+func (r *BundleReconciler) getPodLogs(ctx context.Context, pod *corev1.Pod) ([]byte, error) {
+	logReader, err := r.KubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get pod logs: %v", err)
 	}
@@ -432,12 +420,7 @@ func (r *BundleReconciler) getPodLogs(ctx context.Context, bundle *olmv1alpha1.B
 	return buf.Bytes(), nil
 }
 
-func (r *BundleReconciler) getBundleImageDigest(ctx context.Context, bundle *olmv1alpha1.Bundle) (string, error) {
-	podKey := types.NamespacedName{Namespace: r.PodNamespace, Name: util.PodName(bundle.Name)}
-	pod := &corev1.Pod{}
-	if err := r.Get(ctx, podKey, pod); err != nil {
-		return "", err
-	}
+func (r *BundleReconciler) getBundleImageDigest(pod *corev1.Pod) (string, error) {
 	for _, ps := range pod.Status.InitContainerStatuses {
 		if ps.Name == "copy-bundle" && ps.ImageID != "" {
 			return ps.ImageID, nil
