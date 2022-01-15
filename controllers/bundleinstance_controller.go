@@ -388,7 +388,7 @@ func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *ol
 			}
 			reg.CRDs = append(reg.CRDs, crd)
 		default:
-			reg.Others = append(reg.Others)
+			reg.Others = append(reg.Others, obj)
 		}
 	}
 	plain, err := convert.Convert(reg, installNamespace, watchNamespaces)
