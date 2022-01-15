@@ -117,28 +117,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	installNamespace := bi.Annotations["kuberpak.io/install-namespace"]
-	og, err := r.getOperatorGroup(ctx, installNamespace)
-	if err != nil {
-		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
-			Type:    "Installed",
-			Status:  metav1.ConditionFalse,
-			Reason:  "OperatorGroupLookupFailed",
-			Message: err.Error(),
-		})
-		return ctrl.Result{}, err
-	}
-	if og.Status.LastUpdated == nil {
-		err := errors.New("target naemspaces unknown")
-		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
-			Type:    "Installed",
-			Status:  metav1.ConditionFalse,
-			Reason:  "OperatorGroupNotReady",
-			Message: err.Error(),
-		})
-		return ctrl.Result{}, err
-	}
-	desiredObjects, err := r.getDesiredObjects(ctx, bi, installNamespace, og.Status.Namespaces)
+	reg, err := r.loadBundle(ctx, bi)
 	if err != nil {
 		var bnuErr *errBundleNotUnpacked
 		if errors.As(err, &bnuErr) {
@@ -161,6 +140,44 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			})
 			return ctrl.Result{}, err
 		}
+	}
+
+	installNamespace := fmt.Sprintf("%s-system", b.Status.Info.Package)
+	if ns, ok := bi.Annotations["kuberpak.io/install-namespace"]; ok && ns != "" {
+		installNamespace = ns
+	} else if ns, ok := reg.CSV.Annotations["operatorframework.io/suggested-namespace"]; ok && ns != "" {
+		installNamespace = ns
+	}
+
+	og, err := r.getOperatorGroup(ctx, installNamespace)
+	if err != nil {
+		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+			Type:    "Installed",
+			Status:  metav1.ConditionFalse,
+			Reason:  "OperatorGroupLookupFailed",
+			Message: err.Error(),
+		})
+		return ctrl.Result{}, err
+	}
+	if og.Status.LastUpdated == nil {
+		err := errors.New("target naemspaces unknown")
+		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+			Type:    "Installed",
+			Status:  metav1.ConditionFalse,
+			Reason:  "OperatorGroupNotReady",
+			Message: err.Error(),
+		})
+		return ctrl.Result{}, err
+	}
+	desiredObjects, err := r.getDesiredObjects(*reg, installNamespace, og.Status.Namespaces)
+	if err != nil {
+		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+			Type:    "Installed",
+			Status:  metav1.ConditionFalse,
+			Reason:  "BundleLookupFailed",
+			Message: err.Error(),
+		})
+		return ctrl.Result{}, err
 	}
 
 	chrt := &chart.Chart{
@@ -353,7 +370,7 @@ func (err errBundleNotUnpacked) Error() string {
 	return fmt.Sprintf("%s, current phase=%s", baseError, err.currentPhase)
 }
 
-func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance, installNamespace string, watchNamespaces []string) ([]client.Object, error) {
+func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bi *olmv1alpha1.BundleInstance) (*convert.RegistryV1, error) {
 	b := &olmv1alpha1.Bundle{}
 	if err := r.Get(ctx, types.NamespacedName{Name: bi.Spec.BundleName}, b); err != nil {
 		return nil, fmt.Errorf("get bundle %q: %v", bi.Spec.BundleName, err)
@@ -379,7 +396,6 @@ func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *ol
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &csv); err != nil {
 				return nil, err
 			}
-			csv.SetNamespace(installNamespace)
 			reg.CSV = csv
 		case "CustomResourceDefinition":
 			crd := apiextensionsv1.CustomResourceDefinition{}
@@ -391,50 +407,17 @@ func (r *BundleInstanceReconciler) getDesiredObjects(ctx context.Context, bi *ol
 			reg.Others = append(reg.Others, obj)
 		}
 	}
+	return &reg, nil
+}
+
+func (r *BundleInstanceReconciler) getDesiredObjects(reg convert.RegistryV1, installNamespace string, watchNamespaces []string) ([]client.Object, error) {
+	reg.CSV.Namespace = installNamespace
 	plain, err := convert.Convert(reg, installNamespace, watchNamespaces)
 	if err != nil {
 		return nil, err
 	}
 	return append(plain.Objects, &reg.CSV), nil
 }
-
-//func (r *BundleInstanceReconciler) getActualObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance) ([]client.Object, error) {
-//	us, err := r.ReleaseStorage.Load(ctx, bi)
-//	if apierrors.IsNotFound(err) {
-//		return nil, nil
-//	}
-//	if err != nil {
-//		return nil, err
-//	}
-//	objects := []client.Object{}
-//	for _, u := range us {
-//		u := u
-//		objects = append(objects, &u)
-//	}
-//	return objects, nil
-//}
-
-//func (r *BundleInstanceReconciler) getReleaseObjects(ctx context.Context, bi *olmv1alpha1.BundleInstance) (string, error) {
-//	currentManifestConfigMap := &corev1.ConfigMap{}
-//	currentManifestConfigMapKey := types.NamespacedName{Namespace: r.PodNamespace, Name: fmt.Sprintf("bundle-instance-manifest-%s", bi.Name)}
-//	err := r.Get(ctx, currentManifestConfigMapKey, currentManifestConfigMap)
-//	if apierrors.IsNotFound(err) {
-//		return "", nil
-//	}
-//	if err != nil {
-//		return "", err
-//	}
-//
-//	rd, err := gzip.NewReader(bytes.NewReader(currentManifestConfigMap.BinaryData["manifest"]))
-//	if err != nil {
-//		return "", err
-//	}
-//	currentManifestData, err := io.ReadAll(rd)
-//	if err != nil {
-//		return "", err
-//	}
-//	return string(currentManifestData), nil
-//}
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
