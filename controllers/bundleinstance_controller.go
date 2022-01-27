@@ -308,6 +308,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Status: metav1.ConditionTrue,
 		Reason: "InstallationSucceeded",
 	})
+	bi.Status.InstalledBundleName = bi.Spec.BundleName
 	return ctrl.Result{}, nil
 }
 
