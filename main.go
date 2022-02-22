@@ -20,9 +20,6 @@ import (
 	"flag"
 	"os"
 
-	openshiftv1alpha1 "github.com/openshift/api/operator/v1alpha1"
-	v1 "github.com/operator-framework/api/pkg/operators/v1"
-	"github.com/operator-framework/api/pkg/operators/v1alpha1"
 	helmclient "github.com/operator-framework/helm-operator-plugins/pkg/client"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -50,8 +47,6 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 	utilruntime.Must(olmv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(v1alpha1.AddToScheme(scheme))
-	utilruntime.Must(v1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -71,11 +66,6 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-
-	if err := openshiftv1alpha1.Install(scheme); err != nil {
-		setupLog.Error(err, "unable to add openshift/operators/v1alpha1 api types to scheme")
-		os.Exit(1)
-	}
 
 	cfg := ctrl.GetConfigOrDie()
 	kubeClient, err := kubernetes.NewForConfig(cfg)
@@ -100,8 +90,6 @@ func main() {
 			SelectorsByObject: cache.SelectorsByObject{
 				&olmv1alpha1.BundleInstance{}: {},
 				&olmv1alpha1.Bundle{}:         {},
-				&v1.OperatorGroup{}:           {},
-				//&corev1.Namespace{}:           {},
 			},
 			DefaultSelector: cache.ObjectSelector{
 				Label: dependentSelector,

@@ -2,34 +2,15 @@
 apiVersion: olm.operatorframework.io/v1alpha1
 kind: Bundle
 metadata:
-  name: example-operator-0.1.0-1
+  name: memcached-api-0.1.0
 spec:
-  provisionerClassName: kuberpak.io/registry+v1
-  image: quay.io/joelanford/example-operator-bundle:0.1.0
+  image: quay.io/joelanford/memcached-api-bundle:v0.1.0
+  provisionerClassName: kuberpak.io/plain+v1
 ---
 apiVersion: olm.operatorframework.io/v1alpha1
 kind: Bundle
 metadata:
-  name: example-operator-0.1.0-2
+  name: memcached-api-0.2.0
 spec:
-  provisionerClassName: kuberpak.io/registry+v1
-  image: quay.io/joelanford/secret-operator-bundle:0.1.0
-  imagePullSecrets:
-  - namespace: default
-    name: image-pull-secret
----
-apiVersion: olm.operatorframework.io/v1alpha1
-kind: Bundle
-metadata:
-  name: example-operator-0.2.0
-spec:
-  provisionerClassName: kuberpak.io/registry+v1
-  image: quay.io/joelanford/example-operator-bundle:0.2.0
----
-apiVersion: olm.operatorframework.io/v1alpha1
-kind: Bundle
-metadata:
-  name: example-operator-0.3.0
-spec:
-  provisionerClassName: kuberpak.io/registry+v1
-  image: quay.io/joelanford/example-operator-bundle:0.3.0
+  image: quay.io/joelanford/memcached-api-bundle:v0.2.0
+  provisionerClassName: kuberpak.io/plain+v1

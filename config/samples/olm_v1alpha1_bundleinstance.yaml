@@ -1,9 +1,8 @@
+---
 apiVersion: olm.operatorframework.io/v1alpha1
 kind: BundleInstance
 metadata:
-  name: bundleinstance-sample
-  annotations:
-    kuberpak.io/install-namespace: default
+  name: memcached-api
 spec:
-  provisionerClassName: kuberpak.io/registry+v1
-  bundleName: example-operator-0.1.0-1
+  provisionerClassName: kuberpak.io/plain+v1
+  bundleName: memcached-api-0.1.0
