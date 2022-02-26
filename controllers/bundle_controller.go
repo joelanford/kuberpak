@@ -477,7 +477,7 @@ func getObjects(bundleFS fs.FS) ([]client.Object, error) {
 func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&olmv1alpha1.Bundle{}, builder.WithPredicates(
-			bundleProvisionerFilter("kuberpak.io/registry+v1"),
+			bundleProvisionerFilter("kuberpak.io/plain+v1"),
 		)).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Pod{}).
